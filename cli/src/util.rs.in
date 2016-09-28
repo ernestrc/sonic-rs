@@ -1,0 +1,285 @@
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
+use std::process::Command;
+use std::fs::OpenOptions;
+use std::str::FromStr;
+use std::string::ToString;
+use std::env;
+use std::path::PathBuf;
+use std::collections::BTreeMap;
+
+use serde_json::Value;
+use regex::Regex;
+use ansi_term::Colour::{Red, Yellow};
+use sonic::{SonicMessage, Query};
+
+use super::{ChainErr, Error, Result, ErrorKind};
+
+static DEFAULT_EDITOR: &'static str = "vim";
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ClientConfig {
+    pub host: String,
+    pub tcp_port: u16,
+    pub sources: BTreeMap<String, Value>,
+    pub auth: Option<String>,
+}
+
+impl ClientConfig {
+    pub fn empty() -> ClientConfig {
+        ClientConfig {
+            host: "0.0.0.0".to_string(),
+            tcp_port: 10001,
+            sources: BTreeMap::new(),
+            auth: None,
+        }
+    }
+}
+
+pub fn parse_token(data: Vec<Value>) -> Result<String> {
+
+    let x = try!(data.into_iter()
+        .next()
+        .ok_or_else(|| "output is empty".to_owned()));
+
+    let s = try!(x.as_str()
+        .ok_or_else(|| "token is not a string".to_owned()));
+
+    Ok(s.to_owned())
+}
+
+
+pub fn write_config(config: &ClientConfig, path: &PathBuf) -> Result<()> {
+    debug!("overwriting or creating new configuration file with {:?}",
+           config);
+    let mut f = try!(OpenOptions::new().truncate(true).create(true).write(true).open(path));
+
+    let encoded = try!(::serde_json::to_string_pretty(config));
+
+    try!(f.write_all(encoded.as_bytes()));
+
+    debug!("write success to config file {:?}", path);
+
+    Ok(())
+}
+
+pub fn get_config_path() -> PathBuf {
+    let mut sonicrc = env::home_dir().expect("can't find your home folder");
+    sonicrc.push(".sonicrc");
+    sonicrc
+}
+
+pub fn edit_file(path: &PathBuf) -> Result<String> {
+
+    let editor = env::var_os("EDITOR")
+        .and_then(|e| e.into_string().ok())
+        .unwrap_or_else(|| DEFAULT_EDITOR.to_owned());
+
+    let mut cmd = Command::new(editor);
+
+    let path = try!(path.to_str()
+        .ok_or_else(|| format!("error checking for utf8 validity {:?}", &path)));
+
+    try!(cmd.arg(path).status());
+
+    let mut f = try!(OpenOptions::new().read(true).open(path));
+
+    let mut body = String::new();
+
+    try!(f.read_to_string(&mut body));
+
+    Ok(body)
+}
+
+pub fn read_file_contents(path: &PathBuf) -> Result<String> {
+
+    let mut file = try!(File::open(&path));
+    let mut contents = String::new();
+
+    try!(file.read_to_string(&mut contents));
+
+    return Ok(contents);
+}
+
+pub fn read_config(path: &PathBuf) -> Result<ClientConfig> {
+
+    let contents = try!(read_file_contents(&path));
+
+    let config = try!(::serde_json::from_str::<ClientConfig>(&contents.to_string())
+        .chain_err(|| format!("config {:?} doesn't seem to be a valid JSON", path)));
+
+    Ok(config)
+}
+
+
+/// Sources .sonicrc user config or creates new and prompts user to edit it
+pub fn get_default_config() -> Result<ClientConfig> {
+
+    let path = get_config_path();
+
+    debug!("trying to get configuration in path {:?}", path);
+
+    match fs::metadata(&path) {
+        Ok(ref cfg_attr) if cfg_attr.is_file() => {
+            debug!("found a file in {:?}", path);
+            read_config(&path)
+        }
+        _ => {
+            let mut stdout = io::stdout();
+            stdout.write(b"It looks like it's the first time you're using the sonic CLI. Let's configure a few things. Press any key to continue").unwrap();
+            try!(stdout.flush());
+            let mut input = String::new();
+            match io::stdin().read_line(&mut input) {
+                Ok(_) => {
+                    try!(write_config(&ClientConfig::empty(), &path));
+                    let contents = try!(edit_file(&path));
+                    let c: ClientConfig = try!(::serde_json::from_str(&contents));
+                    println!("successfully saved configuration in $HOME/.sonicrc");
+                    Ok(c)
+                }
+                Err(error) => Err(error.into()),
+            }
+        }
+    }
+}
+
+
+/// Splits strings by character '='
+///
+/// # Examples
+/// ```
+/// use libsonic::util::split_key_value;
+///
+/// let vars = vec!["TABLE=account".to_string(), "DATECUT=2015-09-13".to_string()];
+/// let result = split_key_value(&vars).unwrap();
+///
+/// assert_eq!(result[0].0, "TABLE");
+/// assert_eq!(result[0].1, "account");
+/// assert_eq!(result[1].0, "DATECUT");
+/// assert_eq!(result[1].1, "2015-09-13");
+/// ```
+///
+/// It returns an error if string doesn't contain '='.
+///
+/// # Failures
+/// ```
+/// use libsonic::util::split_key_value;
+///
+/// let vars = vec!["key val".to_string()];
+/// split_key_value(&vars);
+/// ```
+pub fn split_key_value(vars: &Vec<String>) -> Result<Vec<(String, String)>> {
+    debug!("parsing variables {:?}", vars);
+    let mut m: Vec<(String, String)> = Vec::new();
+    for var in vars.into_iter() {
+        if var.contains("=") {
+            let mut split = var.split("=");
+            let left = try!(split.next()
+                .ok_or_else(|| ErrorKind::InvalidFormat(var.clone(), "<key>=<value>".to_owned())));
+            let right = try!(split.next()
+                .ok_or_else(|| ErrorKind::InvalidFormat(var.clone(), "<key>=<value>".to_owned())));
+            m.push((left.to_owned(), right.to_owned()));
+        } else {
+            let err = format!("Cannot split. It should follow format 'key=value'");
+            return Err(ErrorKind::InvalidFormat(var.clone(), err).into());
+        }
+    }
+    debug!("Successfully parsed parsed variables {:?} into {:?}",
+           vars,
+           &m);
+    return Ok(m);
+}
+
+
+/// Attempts to inject all variables to the given template:
+///
+/// # Examples
+/// ```
+/// use libsonic::util::inject_vars;
+///
+/// let query = "select count(*) from ${TABLE} where dt > '${DATECUT}' and dt <= \
+///     date_sub('${DATECUT}', 30);".to_string();
+///
+/// let vars = vec![("TABLE".to_string(), "accounts".to_string()),
+///     ("DATECUT".to_string(), "2015-01-02".to_string())];
+///
+/// assert_eq!(inject_vars(&query, &vars).unwrap(),
+///     "select count(*) from accounts where dt > '2015-01-02' and dt <= \
+///     date_sub('2015-01-02', 30);".to_string());
+///
+/// ```
+///
+/// It will return an Error if there is a discrepancy between variables and template
+///
+/// # Failures
+/// ```
+/// use libsonic::util::inject_vars;
+///
+/// let query = "select count(*) from hamburgers".to_string();
+/// let vars = vec![("TABLE".to_string(), "accounts".to_string())];
+/// inject_vars(&query, &vars);
+///
+/// let query = "select count(*) from ${TABLE} where ${POTATOES}".to_string();
+/// let vars = vec![("TABLE".to_string(), "accounts".to_string())];
+/// inject_vars(&query, &vars);
+///
+/// ```
+pub fn inject_vars(template: &str, vars: &Vec<(String, String)>) -> Result<String> {
+    debug!("injecting variables {:?} into '{:?}'", vars, template);
+    let mut q = String::from_str(template).unwrap();
+    for var in vars.iter() {
+        let k = "${".to_string() + &var.0 + "}";
+        if !q.contains(&k) {
+            return Err(ErrorKind::InvalidFormat(k, "not found in template".to_owned()).into());
+        } else {
+            q = q.replace(&k, &var.1);
+        }
+    }
+
+    debug!("injected all variables: '{:?}'", &q);
+
+    // check if some variables were left un-injected
+    let re = Regex::new(r"(\$\{.*\})").unwrap();
+    if re.is_match(&q) {
+        Err("Some variables remain uninjected".into())
+    } else {
+        Ok(q)
+    }
+}
+
+pub fn build(alias: String,
+             mut sources: BTreeMap<String, Value>,
+             auth: Option<String>,
+             raw_query: String)
+             -> Result<SonicMessage> {
+
+    let clean = sources.remove(&alias);
+
+    let source_config = match clean {
+        Some(o @ Value::Object(_)) => o,
+        None => Value::String(alias),
+        _ => {
+            return Err(format!("source '{}' config is not an object", &alias).into());
+        }
+    };
+
+    let query = SonicMessage::QueryMsg(Query::new(raw_query, None, auth, source_config));
+
+    Ok(query)
+}
+
+pub fn report_error(e: &Error, show_backtrace: bool) {
+    let stderr = io::stderr();
+    let mut handle = stderr.lock();
+    handle.write(&format!("\n{} {}", Red.paint("error:"), e).as_bytes()).unwrap();
+
+    for e in e.iter().skip(1) {
+        handle.write(&format!("\n{} {}", Yellow.paint("caused_by:"), e).as_bytes()).unwrap();
+    }
+
+    if show_backtrace {
+        handle.write(&format!("\nbacktrace:\n{:?}", e.backtrace()).as_bytes()).unwrap();
+    }
+
+    handle.flush().unwrap();
+}

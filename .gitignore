@@ -1,0 +1,6 @@
+target/
+.cache
+perf/*
+.cargo
+npm-debug.log
+lib/rust/src/_io
