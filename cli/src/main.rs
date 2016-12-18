@@ -22,15 +22,15 @@ mod util {
     include!(concat!(env!("OUT_DIR"), "/util.rs"));
 }
 
-use std::path::PathBuf;
-use std::process;
-use std::io::{Write, stderr, stdout};
-use std::cell::RefCell;
 
 use docopt::Docopt;
 use pbr::ProgressBar;
-use sonic::{Authenticate, SonicMessage};
 use rpassword::read_password;
+use sonic::{Authenticate, SonicMessage};
+use std::cell::RefCell;
+use std::io::{Write, stderr, stdout};
+use std::path::PathBuf;
+use std::process;
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
 const USAGE: &'static str = "
@@ -84,18 +84,14 @@ struct Args {
 }
 
 error_chain! {
-    types {
-        Error, ErrorKind, ChainErr, Result;
-    }
-
     links {
-        sonic::Error, sonic::ErrorKind, SonicdError;
+        SonicError(::sonic::error::Error, ::sonic::error::ErrorKind);
     }
 
     foreign_links {
-        ::std::io::Error, IoError;
-        ::serde_json::Error, Json;
-        ::std::sync::mpsc::RecvError, RecvError;
+        IoError(::std::io::Error);
+        Json(::serde_json::Error);
+        RecvError(::std::sync::mpsc::RecvError);
     }
 
     errors {
@@ -126,13 +122,7 @@ fn show<T: Write>(pb: &mut ProgressBar<T>) {
     pb.show_message = true;
 }
 
-fn exec(
-    host: &str,
-    port: &u16,
-    query: SonicMessage,
-    rows_only: bool,
-    silent: bool
-) -> Result<()> {
+fn exec(host: &str, port: &u16, query: SonicMessage, rows_only: bool, silent: bool) -> Result<()> {
 
     let out = RefCell::new(stdout());
     let mut buf: Vec<SonicMessage> = Vec::new();
@@ -150,12 +140,10 @@ fn exec(
         for msg in b.drain(..len) {
             let cols = match msg {
                 SonicMessage::OutputChunk(data) => {
-                    data.iter().fold(String::new(),
-                                     |acc, val| format!("{}{:?}\t", acc, val))
+                    data.iter().fold(String::new(), |acc, val| format!("{}{:?}\t", acc, val))
                 }
                 SonicMessage::TypeMetadata(data) => {
-                    data.iter().fold(String::new(),
-                                     |acc, col| format!("{}{:?}\t", acc, col.0))
+                    data.iter().fold(String::new(), |acc, col| format!("{}{:?}\t", acc, col.0))
                 }
                 _ => panic!("not possible!"),
             };
@@ -214,9 +202,8 @@ fn exec(
             Ok(SonicMessage::StreamCompleted(Some(cause), trace_id)) => {
                 debug!("stream '{}' failed with error {:?}", &cause, trace_id);
                 let error: Error = cause.into();
-                res = Err(error).chain_err(|| {
-                    format!("error when running query; trace_id: {}", trace_id)
-                });
+                res = Err(error)
+                    .chain_err(|| format!("error when running query; trace_id: {}", trace_id));
                 break;
             }
             Err(e) => {
@@ -244,9 +231,7 @@ pub fn login(host: &str, tcp_port: &u16) -> Result<()> {
 
     let (tx, rx) = ::std::sync::mpsc::channel();
 
-    let cmd = SonicMessage::AuthenticateMsg(Authenticate::new(user.to_owned(),
-                                                              key,
-                                                              None));
+    let cmd = SonicMessage::AuthenticateMsg(Authenticate::new(user.to_owned(), key, None));
 
     try!(sonic::stream((host, *tcp_port), cmd, tx));
 
@@ -267,8 +252,7 @@ pub fn login(host: &str, tcp_port: &u16) -> Result<()> {
             Ok(SonicMessage::StreamCompleted(Some(cause), trace_id)) => {
                 let error: Error = cause.into();
                 return Err(error).chain_err(|| {
-                    format!("error when running login command; trace_id: {}",
-                            trace_id)
+                    format!("error when running login command; trace_id: {}", trace_id)
                 });
             }
             Ok(_) => {}
@@ -307,8 +291,7 @@ fn _main(args: Args) -> Result<()> {
                flag_version,
                .. } = args;
 
-    let util::ClientConfig { host, tcp_port, sources, auth } = if flag_c !=
-                                                                    "" {
+    let util::ClientConfig { host, tcp_port, sources, auth } = if flag_c != "" {
         debug!("sourcing passed config in path '{:?}'", &flag_c);
         try!(util::read_config(&PathBuf::from(flag_c)))
     } else {
@@ -318,8 +301,7 @@ fn _main(args: Args) -> Result<()> {
 
     if flag_file {
 
-        let query_str =
-            try!(util::read_file_contents(&PathBuf::from(&arg_file)));
+        let query_str = try!(util::read_file_contents(&PathBuf::from(&arg_file)));
         let split = try!(util::split_key_value(&flag_d));
         let injected = try!(util::inject_vars(&query_str, &split));
         let query = try!(util::build(arg_source, sources, auth, injected));

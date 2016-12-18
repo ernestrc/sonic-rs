@@ -1,13 +1,13 @@
-use std::net::TcpStream;
-use std::os::unix::io::AsRawFd;
-use std::io::Write;
-use std::sync::mpsc::Sender;
-use std::thread;
-use std::net::ToSocketAddrs;
-
-use model::SonicMessage;
 use error::Result;
 use io::*;
+
+use model::SonicMessage;
+use std::io::Write;
+use std::net::TcpStream;
+use std::net::ToSocketAddrs;
+use std::os::unix::io::AsRawFd;
+use std::sync::mpsc::Sender;
+use std::thread;
 
 // TODO rewrite using mio and futures
 fn send_cmd(stream: &mut TcpStream, cmd: SonicMessage) -> Result<()> {
@@ -15,7 +15,7 @@ fn send_cmd(stream: &mut TcpStream, cmd: SonicMessage) -> Result<()> {
     debug!("framing command {:?}", &cmd);
 
     // frame command
-    let fbytes = try!(frame(cmd));
+    let fbytes = try!(cmd.into_bytes());
 
     debug!("framed command into {} bytes", fbytes.len());
 
@@ -26,7 +26,7 @@ fn send_cmd(stream: &mut TcpStream, cmd: SonicMessage) -> Result<()> {
 }
 
 pub fn stream<A>(addr: A, cmd: SonicMessage, tx: Sender<Result<SonicMessage>>) -> Result<()>
-    where A: ToSocketAddrs
+    where A: ToSocketAddrs,
 {
 
     let mut stream = try!(TcpStream::connect(addr));

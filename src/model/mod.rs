@@ -1,11 +1,13 @@
-use serde_json::Value;
-
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use error::Result;
+use io::len_prefix_frame;
+use serde_json::Value;
+use std::io;
 
 // marker trait for messages that client can initiate connection with
 pub trait Command {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Query {
     id: Option<String>,
     query: String,
@@ -14,7 +16,7 @@ pub struct Query {
     config: Value,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Authenticate {
     user: String,
     key: String,
@@ -22,11 +24,12 @@ pub struct Authenticate {
 }
 
 impl Query {
-    pub fn new(query: String,
-               trace_id: Option<String>,
-               auth: Option<String>,
-               config: Value)
-               -> Query {
+    pub fn new(
+        query: String,
+        trace_id: Option<String>,
+        auth: Option<String>,
+        config: Value
+    ) -> Query {
         Query {
             id: None,
             query: query,
@@ -63,7 +66,7 @@ impl Authenticate {
 impl Command for Authenticate {}
 impl Command for Query {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum QueryStatus {
     Queued,
     Started,
@@ -73,7 +76,7 @@ pub enum QueryStatus {
 }
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SonicMessage {
     // client ~> server
     Acknowledge,
@@ -116,8 +119,10 @@ impl SonicMessage {
     }
 
     pub fn from_slice(slice: &[u8]) -> Result<SonicMessage> {
-        let msg = try!(::serde_json::from_slice::<protocol::ProtoSonicMessage>(slice));
-        msg.into_msg()
+        let proto = try!(::serde_json::from_slice::<protocol::ProtoSonicMessage>(slice));
+        let msg = try!(proto.into_msg());
+
+        Ok(msg)
     }
 
     pub fn from_bytes(buf: Vec<u8>) -> Result<SonicMessage> {
@@ -125,8 +130,56 @@ impl SonicMessage {
     }
 
     pub fn into_bytes(self) -> Result<Vec<u8>> {
-        let s = try!(::serde_json::to_string(&self.into_json()));
-        Ok(s.into_bytes())
+        let bytes = try!(::serde_json::to_vec(&self.into_json()));
+        let s = try!(len_prefix_frame(bytes));
+        Ok(s)
+    }
+
+    #[cfg(feature="server")]
+    pub fn from_buffer(buffer: &mut ::rux::buf::ByteBuffer) -> Result<Option<SonicMessage>> {
+        let readable = buffer.readable();
+        if readable < 4 {
+            return Ok(None);
+        }
+
+        let len_buf = &mut [0u8; 4];
+        try!(buffer.read(len_buf));
+        let mut rdr = io::Cursor::new(len_buf);
+        let len = try!(rdr.read_i32::<BigEndian>()) as usize;
+        let total_len = len + 4;
+
+        if readable < total_len {
+            return Ok(None);
+        }
+
+        let proto: protocol::ProtoSonicMessage = 
+            try!(::serde_json::from_slice(buffer.slice(4).split_at(len).0));
+        let msg = try!(proto.into_msg());
+
+        buffer.consume(total_len);
+
+        Ok(Some(msg))
+    }
+
+    #[cfg(feature="server")]
+    pub fn to_buffer(self, buffer: &mut ::rux::buf::ByteBuffer) -> Result<()> {
+        let pos = buffer.next_write();
+        let before = buffer.writable();
+        let proto_msg: protocol::ProtoSonicMessage = From::from(self);
+
+        try!(::serde_json::to_writer(buffer, &proto_msg));
+
+        let len = before - buffer.writable();
+        let len_buf: &mut [u8] = &mut [0_u8; 4];
+
+        {
+            let mut len_rdr = io::Cursor::new(&mut *len_buf);
+            try!(len_rdr.write_i32::<BigEndian>(len as i32));
+        }
+
+        try!(buffer.write_at(pos, len_buf));
+
+        Ok(())
     }
 }
 
@@ -136,4 +189,46 @@ pub mod protocol {
 
     #[cfg(not(feature = "serde_macros"))]
     include!(concat!(env!("OUT_DIR"), "/protocol.rs"));
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::*;
+    use super::*;
+
+    // TODO test partial read
+    #[cfg(feature="server")]
+    #[test]
+    fn msg_buffer() {
+        use rux::buf::ByteBuffer;
+
+        let msg = SonicMessage::StreamCompleted(Some("1234".to_owned()), "ERR".to_owned());
+        let len = msg.clone().into_bytes().unwrap().len();
+
+        let mut buf = ByteBuffer::with_capacity(1024);
+
+        {
+            msg.clone().to_buffer(&mut buf).unwrap();
+        }
+
+        assert_eq!(buf.readable(), len);
+        println!("{:?}", buf);
+
+        {
+
+            let _msg = SonicMessage::from_slice(&buf.slice(0).split_at(4).1).unwrap();
+            assert_eq!(msg, _msg);
+        }
+
+        buf.write(&[1, 2, 3, 4]).unwrap();
+        println!("{:?}", buf);
+
+        {
+            let _msg = SonicMessage::from_buffer(&mut buf)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(msg, _msg);
+        }
+    }
 }

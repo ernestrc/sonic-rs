@@ -1,17 +1,15 @@
-
 error_chain! {
-    types {
-        Error, ErrorKind, ChainErr, Result;
+
+    links {
+        RuxError(::rux::error::Error, ::rux::error::ErrorKind) #[cfg(feature="server")];
     }
 
-    links { }
-
     foreign_links {
-        ::serde_json::Error, Json;
-        ::std::io::Error, IoError;
-        ::std::net::AddrParseError, ParseAddr;
-        ::std::string::FromUtf8Error, Utf8Error;
-        ::nix::Error, NixError;
+        Json(::serde_json::Error);
+        IoError(::std::io::Error);
+        ParseAddr(::std::net::AddrParseError);
+        Utf8Error(::std::string::FromUtf8Error);
+        NixError(::nix::Error);
     }
 
     errors {

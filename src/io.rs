@@ -1,10 +1,12 @@
-use std::io::Cursor;
-use std::os::unix::io::RawFd;
+
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 
 use error::Result;
 use model::SonicMessage;
+use std::io::Cursor;
+use std::os::unix::io::RawFd;
+use std::ptr;
 
 // TODO refactor to use stdlib instead of nix
 
@@ -79,14 +81,22 @@ pub fn read_message(fd: RawFd) -> Result<SonicMessage> {
     SonicMessage::from_slice(buf.as_slice())
 }
 
-pub fn frame(msg: SonicMessage) -> Result<Vec<u8>> {
-    let qbytes = try!(msg.into_bytes());
+pub fn len_prefix_frame(mut bytes: Vec<u8>) -> Result<Vec<u8>> {
 
-    let qlen = qbytes.len() as i32;
-    let mut fbytes = Vec::new();
+    let len = bytes.len();
 
-    try!(fbytes.write_i32::<BigEndian>(qlen));
+    bytes.reserve(4);
 
-    fbytes.extend(qbytes.as_slice());
-    Ok(fbytes)
+    unsafe {
+        {
+            let p = bytes.as_mut_ptr();
+            // Shift everything over to make space for the length prefix
+            ptr::copy(p, p.offset(4), len);
+        }
+        bytes.set_len(len + 4);
+    }
+
+    try!(bytes.split_at_mut(4).0.write_i32::<BigEndian>(len as i32));
+
+    Ok(bytes)
 }

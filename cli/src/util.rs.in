@@ -13,7 +13,7 @@ use regex::Regex;
 use ansi_term::Colour::{Red, Yellow};
 use sonic::{SonicMessage, Query};
 
-use super::{ChainErr, Error, Result, ErrorKind};
+use super::{ResultExt, Error, Result, ErrorKind};
 
 static DEFAULT_EDITOR: &'static str = "vim";
 

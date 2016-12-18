@@ -135,38 +135,45 @@ impl ProtoSonicMessage {
     pub fn into_msg(self) -> Result<SonicMessage> {
         let ProtoSonicMessage { event_type, variation, payload } = self;
 
+        trace!("converting ProtoSonicMessage into SonicMessage: {{ event_type: {:?}, variation: {:?}, \
+                payload: {:?}}}",
+               event_type,
+               variation,
+               payload);
+
         match event_type {
             MessageKind::AcknowledgeKind => Ok(SonicMessage::Acknowledge),
             MessageKind::AuthKind => {
                 let payload = try!(get_payload(payload));
                 let user = try!(payload.get("user")
-                                .and_then(|s| s.as_str().map(|s| s.to_owned()))
-                                .ok_or_else(|| ErrorKind::Proto("missing user field in payload".to_owned())));
+                    .and_then(|s| s.as_str().map(|s| s.to_owned()))
+                    .ok_or_else(|| ErrorKind::Proto("missing user field in payload".to_owned())));
                 let key = try!(payload.get("key")
-                               .and_then(|s| s.as_str().map(|s| s.to_owned()))
-                               .ok_or_else(|| ErrorKind::Proto("missing key field in payload".to_owned())));
-                let trace_id = payload.get("trace_id").and_then(|s| s.as_str().map(|s| s.to_owned()));
+                    .and_then(|s| s.as_str().map(|s| s.to_owned()))
+                    .ok_or_else(|| ErrorKind::Proto("missing key field in payload".to_owned())));
+                let trace_id = payload.get("trace_id")
+                    .and_then(|s| s.as_str().map(|s| s.to_owned()));
 
                 Ok(SonicMessage::AuthenticateMsg(Authenticate {
                     user: user,
                     key: key,
                     trace_id: trace_id,
                 }))
-            },
+            }
             MessageKind::TypeMetadataKind => {
                 let payload = try!(payload
                                    .ok_or_else(|| ErrorKind::Proto("msg payload is empty".to_owned())));
 
                 let data = try!(::serde_json::from_value(payload));
                 Ok(SonicMessage::TypeMetadata(data))
-            },
+            }
             MessageKind::ProgressKind => {
                 let payload = try!(get_payload(payload));
 
                 let total = payload.get("t").and_then(|s| s.as_f64());
 
                 let js = try!(payload.get("s")
-                              .ok_or_else(|| ErrorKind::Proto("missing query status in payload".to_owned())));
+                    .ok_or_else(|| ErrorKind::Proto("missing query status in payload".to_owned())));
 
                 let status = match js {
                     &Value::U64(0) => QueryStatus::Queued,
@@ -175,13 +182,14 @@ impl ProtoSonicMessage {
                     &Value::U64(3) => QueryStatus::Waiting,
                     &Value::U64(4) => QueryStatus::Finished,
                     s => {
-                        return Err(ErrorKind::Proto(format!("unexpected query status {:?}", s)).into());
+                        return Err(ErrorKind::Proto(format!("unexpected query status {:?}", s))
+                            .into());
                     }
                 };
 
                 let progress = try!(payload.get("p")
-                                    .and_then(|s| s.as_f64())
-                                    .ok_or_else(|| ErrorKind::Proto("progress not found in payload".to_owned())));
+                    .and_then(|s| s.as_f64())
+                    .ok_or_else(|| ErrorKind::Proto("progress not found in payload".to_owned())));
 
                 let units = payload.get("u").and_then(|s| s.as_str().map(|s| s.to_owned()));
 
@@ -191,19 +199,20 @@ impl ProtoSonicMessage {
                     total: total,
                     units: units,
                 })
-            },
+            }
             MessageKind::OutputKind => {
                 match payload {
                     Some(Value::Array(data)) => Ok(SonicMessage::OutputChunk(data)),
                     s => try!(Err(ErrorKind::Proto(format!("payload is not an array: {:?}", s)))),
                 }
-            },
+            }
             MessageKind::StreamStartedKind => {
-                let trace_id = try!(variation
-                                 .ok_or_else(|| ErrorKind::Proto("StreamStarted 'variation' field is empty".to_owned())));
+                let trace_id = try!(variation.ok_or_else(|| {
+                    ErrorKind::Proto("StreamStarted 'variation' field is empty".to_owned())
+                }));
 
                 Ok(SonicMessage::StreamStarted(trace_id))
-            },
+            }
             MessageKind::StreamCompletedKind => {
                 let payload = try!(get_payload(payload));
 
@@ -212,7 +221,7 @@ impl ProtoSonicMessage {
                     .ok_or_else(|| ErrorKind::Proto("missing 'trace_id' in payload".to_owned())));
 
                 Ok(SonicMessage::StreamCompleted(variation, trace_id))
-            },
+            }
             MessageKind::QueryKind => {
                 let payload = try!(get_payload(payload));
 
@@ -226,19 +235,19 @@ impl ProtoSonicMessage {
                                  .ok_or_else(|| ErrorKind::Proto("msg variation is empty".to_owned())));
 
                 let config = try!(payload.get("config")
-                                  .map(|c| c.to_owned())
-                                  .ok_or_else(|| {
-                                      ErrorKind::Proto("missing 'config' in query message payload".to_owned())
-                                  }));
+                    .map(|c| c.to_owned())
+                    .ok_or_else(|| {
+                        ErrorKind::Proto("missing 'config' in query message payload".to_owned())
+                    }));
 
-                Ok(SonicMessage::QueryMsg(Query{
+                Ok(SonicMessage::QueryMsg(Query {
                     id: None,
                     trace_id: trace_id,
                     query: query,
                     auth: auth_token,
                     config: config,
                 }))
-            },
+            }
         }
     }
 }
