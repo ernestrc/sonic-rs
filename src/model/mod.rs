@@ -212,16 +212,12 @@ mod tests {
         }
 
         assert_eq!(buf.readable(), len);
-        println!("{:?}", buf);
 
         {
 
             let _msg = SonicMessage::from_slice(&buf.slice(0).split_at(4).1).unwrap();
             assert_eq!(msg, _msg);
         }
-
-        buf.write(&[1, 2, 3, 4]).unwrap();
-        println!("{:?}", buf);
 
         {
             let _msg = SonicMessage::from_buffer(&mut buf)
@@ -230,5 +226,33 @@ mod tests {
 
             assert_eq!(msg, _msg);
         }
+
+        {
+            msg.clone().to_buffer(&mut buf).unwrap();
+        }
+
+        {
+            msg.clone().to_buffer(&mut buf).unwrap();
+        }
+
+        assert_eq!(buf.readable(), len * 2);
+
+        {
+            let _msg = SonicMessage::from_buffer(&mut buf)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(msg, _msg);
+        }
+
+        {
+            let _msg = SonicMessage::from_buffer(&mut buf)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(msg, _msg);
+        }
+
+        assert_eq!(buf.readable(), 0);
     }
 }
