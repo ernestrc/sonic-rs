@@ -1,6 +1,7 @@
-use std::collections::BTreeMap;
-use serde_json::Value;
+
 use error::{Result, ErrorKind};
+use serde_json::Value;
+use std::collections::BTreeMap;
 use super::*;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq)]
@@ -82,10 +83,18 @@ impl From<SonicMessage> for ProtoSonicMessage {
                     payload: Some(::serde_json::to_value(&meta)),
                 }
             },
-            SonicMessage::QueryProgress{ progress, total, units, .. } => {
+            SonicMessage::QueryProgress{ progress, total, units, status } => {
                 let mut payload = BTreeMap::new();
 
                 payload.insert("p".to_owned(), Value::F64(progress));
+                
+                payload.insert("s".to_owned(), match status {
+                    QueryStatus::Queued   => Value::U64(0),
+                    QueryStatus::Started  => Value::U64(1),
+                    QueryStatus::Running  => Value::U64(2),
+                    QueryStatus::Waiting  => Value::U64(3),
+                    QueryStatus::Finished => Value::U64(4)
+                });
 
                 units.map(|u| payload.insert("u".to_owned(), Value::String(u)));
                 total.map(|t| payload.insert("t".to_owned(), Value::F64(t)));
@@ -135,8 +144,8 @@ impl ProtoSonicMessage {
     pub fn into_msg(self) -> Result<SonicMessage> {
         let ProtoSonicMessage { event_type, variation, payload } = self;
 
-        trace!("converting ProtoSonicMessage into SonicMessage: {{ event_type: {:?}, variation: {:?}, \
-                payload: {:?}}}",
+        trace!("converting ProtoSonicMessage into SonicMessage: {{ event_type: {:?}, variation: \
+                {:?}, payload: {:?}}}",
                event_type,
                variation,
                payload);
@@ -145,12 +154,12 @@ impl ProtoSonicMessage {
             MessageKind::AcknowledgeKind => Ok(SonicMessage::Acknowledge),
             MessageKind::AuthKind => {
                 let payload = try!(get_payload(payload));
+                let key = try!(variation.ok_or_else(|| {
+                    ErrorKind::Proto("AuthenticateMsg: 'variation' field is empty".to_owned())
+                }));
                 let user = try!(payload.get("user")
                     .and_then(|s| s.as_str().map(|s| s.to_owned()))
-                    .ok_or_else(|| ErrorKind::Proto("missing user field in payload".to_owned())));
-                let key = try!(payload.get("key")
-                    .and_then(|s| s.as_str().map(|s| s.to_owned()))
-                    .ok_or_else(|| ErrorKind::Proto("missing key field in payload".to_owned())));
+                    .ok_or_else(|| ErrorKind::Proto("missing 'user' field in payload".to_owned())));
                 let trace_id = payload.get("trace_id")
                     .and_then(|s| s.as_str().map(|s| s.to_owned()));
 
@@ -173,7 +182,7 @@ impl ProtoSonicMessage {
                 let total = payload.get("t").and_then(|s| s.as_f64());
 
                 let js = try!(payload.get("s")
-                    .ok_or_else(|| ErrorKind::Proto("missing query status in payload".to_owned())));
+                    .ok_or_else(|| ErrorKind::Proto("missing 's' field in payload".to_owned())));
 
                 let status = match js {
                     &Value::U64(0) => QueryStatus::Queued,

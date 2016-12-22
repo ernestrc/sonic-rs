@@ -1,5 +1,5 @@
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use error::Result;
+use error::*;
 use io::len_prefix_frame;
 use serde_json::Value;
 use std::io;
@@ -9,11 +9,11 @@ pub trait Command {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
-    id: Option<String>,
-    query: String,
-    trace_id: Option<String>,
-    auth: Option<String>,
-    config: Value,
+    pub id: Option<String>,
+    pub query: String,
+    pub trace_id: Option<String>,
+    pub auth: Option<String>,
+    pub config: Value,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -44,7 +44,8 @@ impl Query {
     }
 
     pub fn get_config<'a>(&'a self, key: &str) -> Result<&'a Value> {
-        let v = try!(self.config.search(key).ok_or(format!("missing key {} in query config", key)));
+        let v =
+            try!(self.config.search(key).ok_or(format!("missing key '{}' in query config", key)));
         Ok(v)
     }
 
@@ -152,7 +153,7 @@ impl SonicMessage {
             return Ok(None);
         }
 
-        let proto: protocol::ProtoSonicMessage = 
+        let proto: protocol::ProtoSonicMessage =
             try!(::serde_json::from_slice(buffer.slice(4).split_at(len).0));
         let msg = try!(proto.into_msg());
 
@@ -163,11 +164,23 @@ impl SonicMessage {
 
     #[cfg(feature="server")]
     pub fn to_buffer(self, buffer: &mut ::rux::buf::ByteBuffer) -> Result<()> {
-        let pos = buffer.next_write();
+        let mark  = buffer.mark();
         let before = buffer.writable();
         let proto_msg: protocol::ProtoSonicMessage = From::from(self);
 
-        try!(::serde_json::to_writer(buffer, &proto_msg));
+        match ::serde_json::to_writer(buffer, &proto_msg) {
+            Err(e) => {
+                buffer.reset(mark);
+                return Err(e).chain_err(|| ErrorKind::BufferTooSmall(proto_msg.into_msg().unwrap()));
+            }
+            Ok(_) if buffer.writable() < 4 => {
+                buffer.reset(mark);
+                let err: Error = "not enough space in buffer for length prefix (4b)".into();
+                return Err(err)
+                    .chain_err(|| ErrorKind::BufferTooSmall(proto_msg.into_msg().unwrap()));
+            }
+            Ok(_) => {}
+        };
 
         let len = before - buffer.writable();
         let len_buf: &mut [u8] = &mut [0_u8; 4];
@@ -177,7 +190,7 @@ impl SonicMessage {
             try!(len_rdr.write_i32::<BigEndian>(len as i32));
         }
 
-        try!(buffer.write_at(pos, len_buf));
+        try!(buffer.write_at(mark.next_write, len_buf));
 
         Ok(())
     }
@@ -193,7 +206,6 @@ pub mod protocol {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::*;
     use super::*;
 
     // TODO test partial read

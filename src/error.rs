@@ -1,3 +1,5 @@
+use model::SonicMessage;
+
 error_chain! {
 
     links {
@@ -13,20 +15,19 @@ error_chain! {
     }
 
     errors {
-
-        BufferOverflowError(max: usize) {
-            description("Buffer overflow error")
-                display("Buffer exceeded max of {} bytes", max)
+        BufferTooSmall(msg: SonicMessage) {
+            description("buffer too small for SonicMessage")
+            display("buffer too small for SonicMessage: {:?}", msg)
         }
 
-        QueryError(msg: String) {
-            description("error in query")
-                display("{}", msg)
+        MessageTooBig(max_size: usize) {
+            description("message bigger than max message size")
+            display("message bigger than max message size of {:?}", max_size)
         }
 
         Proto(msg: String) {
-            description("Sonicd protocol error")
-                display("Sonicd protocol error: {}: lib is v.{}", msg, super::VERSION)
+            description("Sonic protocol error")
+            display("Sonic protocol error: {}: lib is v.{}", msg, super::VERSION)
         }
     }
 }
