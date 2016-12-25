@@ -1,67 +1,60 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use error::*;
 use io::len_prefix_frame;
 use serde_json::Value;
-use std::io;
 
 // marker trait for messages that client can initiate connection with
 pub trait Command {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
-    pub id: Option<String>,
-    pub query: String,
-    pub trace_id: Option<String>,
-    pub auth: Option<String>,
-    pub config: Value,
+  pub id: Option<String>,
+  pub query: String,
+  pub trace_id: Option<String>,
+  pub auth: Option<String>,
+  pub config: Value,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Authenticate {
-    user: String,
-    key: String,
-    trace_id: Option<String>,
+  user: String,
+  key: String,
+  trace_id: Option<String>,
 }
 
 impl Query {
-    pub fn new(
-        query: String,
-        trace_id: Option<String>,
-        auth: Option<String>,
-        config: Value
-    ) -> Query {
-        Query {
-            id: None,
-            query: query,
-            trace_id: trace_id,
-            auth: auth,
-            config: config,
-        }
+  pub fn new(query: String, trace_id: Option<String>, auth: Option<String>, config: Value)
+             -> Query {
+    Query {
+      id: None,
+      query: query,
+      trace_id: trace_id,
+      auth: auth,
+      config: config,
     }
+  }
 
-    pub fn get_raw<'a>(&'a self) -> &'a str {
-        &(self.query)
-    }
+  pub fn get_raw<'a>(&'a self) -> &'a str {
+    &(self.query)
+  }
 
-    pub fn get_config<'a>(&'a self, key: &str) -> Result<&'a Value> {
-        let v =
-            try!(self.config.search(key).ok_or(format!("missing key '{}' in query config", key)));
-        Ok(v)
-    }
+  pub fn get_config<'a>(&'a self, key: &str) -> Result<&'a Value> {
+    let v = try!(self.config.search(key).ok_or(format!("missing key '{}' in query config", key)));
+    Ok(v)
+  }
 
-    pub fn get_opt<'a>(&'a self, key: &str) -> Option<&'a Value> {
-        self.config.search(key)
-    }
+  pub fn get_opt<'a>(&'a self, key: &str) -> Option<&'a Value> {
+    self.config.search(key)
+  }
 }
 
 impl Authenticate {
-    pub fn new(user: String, key: String, trace_id: Option<String>) -> Authenticate {
-        Authenticate {
-            user: user,
-            key: key,
-            trace_id: trace_id,
-        }
+  pub fn new(user: String, key: String, trace_id: Option<String>) -> Authenticate {
+    Authenticate {
+      user: user,
+      key: key,
+      trace_id: trace_id,
     }
+  }
 }
 
 impl Command for Authenticate {}
@@ -69,202 +62,208 @@ impl Command for Query {}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum QueryStatus {
-    Queued,
-    Started,
-    Running,
-    Waiting,
-    Finished,
+  Queued,
+  Started,
+  Running,
+  Waiting,
+  Finished,
 }
 
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SonicMessage {
-    // client ~> server
-    Acknowledge,
+  // client ~> server
+  Acknowledge,
 
-    StreamStarted(String),
+  StreamStarted(String),
 
-    QueryMsg(Query),
+  QueryMsg(Query),
 
-    AuthenticateMsg(Authenticate),
+  AuthenticateMsg(Authenticate),
 
-    // client <~ server
-    TypeMetadata(Vec<(String, Value)>),
+  // client <~ server
+  TypeMetadata(Vec<(String, Value)>),
 
-    QueryProgress {
-        status: QueryStatus,
-        progress: f64,
-        total: Option<f64>,
-        units: Option<String>,
-    },
+  QueryProgress {
+    status: QueryStatus,
+    progress: f64,
+    total: Option<f64>,
+    units: Option<String>,
+  },
 
-    OutputChunk(Vec<Value>),
+  OutputChunk(Vec<Value>),
 
-    StreamCompleted(Option<String>, String),
+  StreamCompleted(Option<String>, String),
 }
 
 impl SonicMessage {
-    // StreamComplete error
-    pub fn complete<T>(e: Result<T>, trace_id: String) -> SonicMessage {
-        let variation = match e {
-            Ok(_) => None,
-            Err(e) => Some(format!("{}", e).to_owned()),
-        };
-        SonicMessage::StreamCompleted(variation, trace_id).into()
+  // StreamComplete error
+  pub fn complete<T>(e: Result<T>, trace_id: String) -> SonicMessage {
+    let variation = match e {
+      Ok(_) => None,
+      Err(e) => Some(format!("{}", e).to_owned()),
+    };
+    SonicMessage::StreamCompleted(variation, trace_id).into()
+  }
+
+  pub fn into_json(self) -> Value {
+    let msg: protocol::ProtoSonicMessage = From::from(self);
+
+    ::serde_json::to_value(&msg)
+  }
+
+  pub fn from_slice(slice: &[u8]) -> Result<SonicMessage> {
+    let proto = try!(::serde_json::from_slice::<protocol::ProtoSonicMessage>(slice));
+    let msg = try!(proto.into_msg());
+
+    Ok(msg)
+  }
+
+  pub fn from_bytes(buf: Vec<u8>) -> Result<SonicMessage> {
+    Self::from_slice(buf.as_slice())
+  }
+
+  pub fn into_bytes(self) -> Result<Vec<u8>> {
+    let bytes = try!(::serde_json::to_vec(&self.into_json()));
+    let s = try!(len_prefix_frame(bytes));
+    Ok(s)
+  }
+
+
+  #[cfg(feature="server")]
+  pub fn from_buffer(buffer: &mut ::rux::buf::ByteBuffer) -> Result<Option<SonicMessage>> {
+    use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+    use std::io;
+
+    let readable = buffer.readable();
+    if readable < 4 {
+      return Ok(None);
     }
 
-    pub fn into_json(self) -> Value {
-        let msg: protocol::ProtoSonicMessage = From::from(self);
+    let len_buf = &mut [0u8; 4];
+    try!(buffer.read(len_buf));
+    let mut rdr = io::Cursor::new(len_buf);
+    let len = try!(rdr.read_i32::<BigEndian>()) as usize;
+    let total_len = len + 4;
 
-        ::serde_json::to_value(&msg)
+    if readable < total_len {
+      return Ok(None);
     }
 
-    pub fn from_slice(slice: &[u8]) -> Result<SonicMessage> {
-        let proto = try!(::serde_json::from_slice::<protocol::ProtoSonicMessage>(slice));
-        let msg = try!(proto.into_msg());
+    let proto: protocol::ProtoSonicMessage =
+      try!(::serde_json::from_slice(buffer.slice(4).split_at(len).0));
+    let msg = try!(proto.into_msg());
 
-        Ok(msg)
+    buffer.consume(total_len);
+
+    Ok(Some(msg))
+  }
+
+  #[cfg(feature="server")]
+  pub fn to_buffer(self, buffer: &mut ::rux::buf::ByteBuffer) -> Result<()> {
+    use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+    use std::io;
+
+    let mark = buffer.mark();
+    let before = buffer.writable();
+    let proto_msg: protocol::ProtoSonicMessage = From::from(self);
+
+    match ::serde_json::to_writer(buffer, &proto_msg) {
+      Err(e) => {
+        buffer.reset(mark);
+        return Err(e).chain_err(|| ErrorKind::BufferTooSmall(proto_msg.into_msg().unwrap()));
+      }
+      Ok(_) if buffer.writable() < 4 => {
+        buffer.reset(mark);
+        let err: Error = "not enough space in buffer for length prefix (4b)".into();
+        return Err(err).chain_err(|| ErrorKind::BufferTooSmall(proto_msg.into_msg().unwrap()));
+      }
+      Ok(_) => {}
+    };
+
+    let len = before - buffer.writable();
+    let len_buf: &mut [u8] = &mut [0_u8; 4];
+
+    {
+      let mut len_rdr = io::Cursor::new(&mut *len_buf);
+      try!(len_rdr.write_i32::<BigEndian>(len as i32));
     }
 
-    pub fn from_bytes(buf: Vec<u8>) -> Result<SonicMessage> {
-        Self::from_slice(buf.as_slice())
-    }
+    try!(buffer.write_at(mark.next_write, len_buf));
 
-    pub fn into_bytes(self) -> Result<Vec<u8>> {
-        let bytes = try!(::serde_json::to_vec(&self.into_json()));
-        let s = try!(len_prefix_frame(bytes));
-        Ok(s)
-    }
-
-    #[cfg(feature="server")]
-    pub fn from_buffer(buffer: &mut ::rux::buf::ByteBuffer) -> Result<Option<SonicMessage>> {
-        let readable = buffer.readable();
-        if readable < 4 {
-            return Ok(None);
-        }
-
-        let len_buf = &mut [0u8; 4];
-        try!(buffer.read(len_buf));
-        let mut rdr = io::Cursor::new(len_buf);
-        let len = try!(rdr.read_i32::<BigEndian>()) as usize;
-        let total_len = len + 4;
-
-        if readable < total_len {
-            return Ok(None);
-        }
-
-        let proto: protocol::ProtoSonicMessage =
-            try!(::serde_json::from_slice(buffer.slice(4).split_at(len).0));
-        let msg = try!(proto.into_msg());
-
-        buffer.consume(total_len);
-
-        Ok(Some(msg))
-    }
-
-    #[cfg(feature="server")]
-    pub fn to_buffer(self, buffer: &mut ::rux::buf::ByteBuffer) -> Result<()> {
-        let mark  = buffer.mark();
-        let before = buffer.writable();
-        let proto_msg: protocol::ProtoSonicMessage = From::from(self);
-
-        match ::serde_json::to_writer(buffer, &proto_msg) {
-            Err(e) => {
-                buffer.reset(mark);
-                return Err(e).chain_err(|| ErrorKind::BufferTooSmall(proto_msg.into_msg().unwrap()));
-            }
-            Ok(_) if buffer.writable() < 4 => {
-                buffer.reset(mark);
-                let err: Error = "not enough space in buffer for length prefix (4b)".into();
-                return Err(err)
-                    .chain_err(|| ErrorKind::BufferTooSmall(proto_msg.into_msg().unwrap()));
-            }
-            Ok(_) => {}
-        };
-
-        let len = before - buffer.writable();
-        let len_buf: &mut [u8] = &mut [0_u8; 4];
-
-        {
-            let mut len_rdr = io::Cursor::new(&mut *len_buf);
-            try!(len_rdr.write_i32::<BigEndian>(len as i32));
-        }
-
-        try!(buffer.write_at(mark.next_write, len_buf));
-
-        Ok(())
-    }
+    Ok(())
+  }
 }
 
 pub mod protocol {
-    #[cfg(feature = "serde_macros")]
-    include!("protocol.rs.in");
+  #[cfg(feature = "serde_macros")]
+  include!("protocol.rs.in");
 
-    #[cfg(not(feature = "serde_macros"))]
-    include!(concat!(env!("OUT_DIR"), "/protocol.rs"));
+  #[cfg(not(feature = "serde_macros"))]
+  include!(concat!(env!("OUT_DIR"), "/protocol.rs"));
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+  use super::*;
 
-    // TODO test partial read
-    #[cfg(feature="server")]
-    #[test]
-    fn msg_buffer() {
-        use rux::buf::ByteBuffer;
+  // TODO test partial read
+  #[cfg(feature="server")]
+  #[test]
+  fn msg_buffer() {
+    use rux::buf::ByteBuffer;
 
-        let msg = SonicMessage::StreamCompleted(Some("1234".to_owned()), "ERR".to_owned());
-        let len = msg.clone().into_bytes().unwrap().len();
+    let msg = SonicMessage::StreamCompleted(Some("1234".to_owned()), "ERR".to_owned());
+    let len = msg.clone().into_bytes().unwrap().len();
 
-        let mut buf = ByteBuffer::with_capacity(1024);
+    let mut buf = ByteBuffer::with_capacity(1024);
 
-        {
-            msg.clone().to_buffer(&mut buf).unwrap();
-        }
-
-        assert_eq!(buf.readable(), len);
-
-        {
-
-            let _msg = SonicMessage::from_slice(&buf.slice(0).split_at(4).1).unwrap();
-            assert_eq!(msg, _msg);
-        }
-
-        {
-            let _msg = SonicMessage::from_buffer(&mut buf)
-                .unwrap()
-                .unwrap();
-
-            assert_eq!(msg, _msg);
-        }
-
-        {
-            msg.clone().to_buffer(&mut buf).unwrap();
-        }
-
-        {
-            msg.clone().to_buffer(&mut buf).unwrap();
-        }
-
-        assert_eq!(buf.readable(), len * 2);
-
-        {
-            let _msg = SonicMessage::from_buffer(&mut buf)
-                .unwrap()
-                .unwrap();
-
-            assert_eq!(msg, _msg);
-        }
-
-        {
-            let _msg = SonicMessage::from_buffer(&mut buf)
-                .unwrap()
-                .unwrap();
-
-            assert_eq!(msg, _msg);
-        }
-
-        assert_eq!(buf.readable(), 0);
+    {
+      msg.clone().to_buffer(&mut buf).unwrap();
     }
+
+    assert_eq!(buf.readable(), len);
+
+    {
+
+      let _msg = SonicMessage::from_slice(&buf.slice(0).split_at(4).1).unwrap();
+      assert_eq!(msg, _msg);
+    }
+
+    {
+      let _msg = SonicMessage::from_buffer(&mut buf)
+        .unwrap()
+        .unwrap();
+
+      assert_eq!(msg, _msg);
+    }
+
+    {
+      msg.clone().to_buffer(&mut buf).unwrap();
+    }
+
+    {
+      msg.clone().to_buffer(&mut buf).unwrap();
+    }
+
+    assert_eq!(buf.readable(), len * 2);
+
+    {
+      let _msg = SonicMessage::from_buffer(&mut buf)
+        .unwrap()
+        .unwrap();
+
+      assert_eq!(msg, _msg);
+    }
+
+    {
+      let _msg = SonicMessage::from_buffer(&mut buf)
+        .unwrap()
+        .unwrap();
+
+      assert_eq!(msg, _msg);
+    }
+
+    assert_eq!(buf.readable(), 0);
+  }
 }
