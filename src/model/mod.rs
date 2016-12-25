@@ -132,7 +132,7 @@ impl SonicMessage {
 
   #[cfg(feature="server")]
   pub fn from_buffer(buffer: &mut ::rux::buf::ByteBuffer) -> Result<Option<SonicMessage>> {
-    use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+    use byteorder::{BigEndian, ReadBytesExt};
     use std::io;
 
     let readable = buffer.readable();
@@ -161,7 +161,7 @@ impl SonicMessage {
 
   #[cfg(feature="server")]
   pub fn to_buffer(self, buffer: &mut ::rux::buf::ByteBuffer) -> Result<()> {
-    use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+    use byteorder::{BigEndian, WriteBytesExt};
     use std::io;
 
     let mark = buffer.mark();

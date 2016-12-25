@@ -1,9 +1,9 @@
 use error::*;
 use model::SonicMessage;
 use rux::{send as rsend, recv as rrecv};
-use rux::buf::ByteBuffer;
-use rux::handler::{Handler, Reset};
-use rux::handler::mux::MuxCmd;
+use rux::buf::*;
+use rux::handler::*;
+use rux::mux::*;
 use rux::poll::*;
 use rux::sys::socket::*;
 use std::os::unix::io::RawFd;
@@ -11,27 +11,9 @@ use std::os::unix::io::RawFd;
 static MIN_BUFFER_SIZE: &'static usize = &128;
 static DEFAULT_MAX_MESSAGE_SIZE: &'static usize = &(1024 * 1024);
 
-#[macro_export]
-macro_rules! or_complete {
-    ($e:expr, $sel:expr, $fd: expr) => {{
-        match $e {
-            Ok(cmd) => cmd,
-            Err(e) => {
-                error!("or_complete!: {}", e);
-                return $sel.complete_err(e, $fd);
-            },
-        }
-    }}
-}
-
-// TODO should not take a Handler, rather it should be designed
-// to interact with new design where it is owned by the
-// downstream handler
-pub struct SonicHandler<'b, H>
-  where H: Handler<SonicMessage, Option<SonicMessage>> + Reset,
-{
-  next: H,
+pub struct SonicHandler<'b> {
   epfd: EpollFd,
+  sockfd: RawFd,
   pub input_buffer: &'b mut ByteBuffer,
   pub output_buffer: &'b mut ByteBuffer,
   is_readable: bool,
@@ -41,16 +23,14 @@ pub struct SonicHandler<'b, H>
   completing: bool,
 }
 
-impl<'b, H> SonicHandler<'b, H>
-  where H: Handler<SonicMessage, Option<SonicMessage>> + Reset,
-{
+impl<'b> SonicHandler<'b> {
   pub fn new(input_buffer: &'b mut ByteBuffer, output_buffer: &'b mut ByteBuffer, epfd: EpollFd,
-             next: H)
-             -> SonicHandler<'b, H> {
+             sockfd: RawFd)
+             -> SonicHandler<'b> {
     assert!(input_buffer.capacity() >= *MIN_BUFFER_SIZE);
     assert!(output_buffer.capacity() >= *MIN_BUFFER_SIZE);
     SonicHandler {
-      next: next,
+      sockfd: sockfd,
       input_buffer: input_buffer,
       output_buffer: output_buffer,
       epfd: epfd,
@@ -63,7 +43,7 @@ impl<'b, H> SonicHandler<'b, H>
   }
 
   #[inline(always)]
-  fn try_write(&mut self, fd: RawFd) -> Result<MuxCmd> {
+  fn try_write(&mut self) -> Result<MuxCmd> {
     if !self.output_buffer.is_readable() {
       if self.closed_write {
         return Ok(MuxCmd::Close);
@@ -82,7 +62,7 @@ impl<'b, H> SonicHandler<'b, H>
 
     while len > 0 {
 
-      match rsend(fd, From::from(&*self.output_buffer), MSG_DONTWAIT)? {
+      match rsend(self.sockfd, From::from(&*self.output_buffer), MSG_DONTWAIT)? {
         None => {
           trace!("SonicHandler::try_write(): not ready");
           self.is_writable == false;
@@ -107,14 +87,14 @@ impl<'b, H> SonicHandler<'b, H>
   }
 
   #[inline(always)]
-  fn try_read(&mut self, fd: RawFd) -> Result<()> {
+  fn try_read(&mut self) -> Result<()> {
     if self.closed_write || !self.is_readable {
       return Ok(());
     }
 
     while self.input_buffer.is_writable() {
 
-      match rrecv(fd, From::from(&mut *self.input_buffer), MSG_DONTWAIT)? {
+      match rrecv(self.sockfd, From::from(&mut *self.input_buffer), MSG_DONTWAIT)? {
         Some(0) => {
           trace!("SonicHandler::try_read(): EOF");
           self.is_readable == false;
@@ -141,13 +121,13 @@ impl<'b, H> SonicHandler<'b, H>
       self.assert_max_size(&*self.input_buffer)?;
 
       trace!("SonicHandler::try_read(): increased input_buffer size by {}", additional);
-      return self.try_read(fd);
+      return self.try_read();
     }
 
     Ok(())
   }
 
-  fn complete_err(&mut self, err: Error, fd: RawFd) -> MuxCmd {
+  fn complete_err(&mut self, err: Error) -> MuxCmd {
     self.completing = true;
 
     // FIXME if error occurs when some bytes have been flushed
@@ -155,7 +135,7 @@ impl<'b, H> SonicHandler<'b, H>
 
     let msg = SonicMessage::complete::<()>(Err(err), "".to_owned());
     self.buffer(msg).unwrap();
-    self.try_write(fd).unwrap()
+    self.try_write().unwrap()
   }
 
   #[inline(always)]
@@ -185,70 +165,92 @@ impl<'b, H> SonicHandler<'b, H>
   }
 }
 
-impl<'b, H> Reset for SonicHandler<'b, H>
-  where H: Handler<SonicMessage, Option<SonicMessage>> + Reset,
-{
+impl<'b> Reset for SonicHandler<'b> {
   fn reset(&mut self, epfd: EpollFd) {
     self.epfd = epfd;
     self.completing = false;
     self.input_buffer.clear();
     self.output_buffer.clear();
-    self.next.reset(epfd);
   }
 }
 
-impl<'b, H> Handler<EpollEvent, MuxCmd> for SonicHandler<'b, H>
-  where H: Handler<SonicMessage, Option<SonicMessage>> + Reset,
-{
+macro_rules! or_complete {
+    ($e:expr, $sel:expr) => {{
+        match $e {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                error!("or_complete!: {}", e);
+                return $sel.complete_err(e);
+            },
+        }
+    }}
+}
+
+impl<'b> Handler<SonicMessage, MuxCmd> for SonicHandler<'b> {
+  fn ready(&mut self, msg: SonicMessage) -> MuxCmd {
+    trace!("ready(SonicMessage): {:?}", msg);
+    or_complete!(self.buffer(msg), self);
+    or_complete!(self.try_write(), self)
+  }
+}
+
+#[macro_export]
+macro_rules! frame {
+  ($buffer:expr, $func:expr) => {{
+    let res;
+    loop {
+      match SonicMessage::from_buffer($buffer) {
+        Ok(Some(msg)) => {
+          $func(msg);
+        }
+        Ok(None) => {
+          trace!("no message to frame from input buffer");
+          res = Ok(());
+          break;
+        },
+        Err(e) => { 
+          res = Err(e);
+          break;
+        },
+      }
+    }
+    res
+  }}
+}
+
+impl<'b> Handler<EpollEvent, MuxCmd> for SonicHandler<'b> {
   fn ready(&mut self, event: EpollEvent) -> MuxCmd {
-    let fd = event.data as i32;
     let kind = event.events;
-    trace!("ready({:?}: {:?})", &fd, &kind);
+    trace!("ready(EpollEvent{{ {:?}, {:?} }})", &self.sockfd, &kind);
 
     if kind.contains(EPOLLHUP) {
-      trace!("fd={}: EPOLLHUP", fd);
+      trace!("fd={}: EPOLLHUP", self.sockfd);
       return MuxCmd::Close;
     }
 
     if kind.contains(EPOLLRDHUP) {
-      trace!("fd={}: EPOLLRDHUP", fd);
+      trace!("fd={}: EPOLLRDHUP", self.sockfd);
       self.closed_write = true;
     }
 
     if kind.contains(EPOLLIN) {
-      trace!("fd={}: EPOLLIN", fd);
+      trace!("fd={}: EPOLLIN", self.sockfd);
       self.is_readable = true;
     }
 
     if kind.contains(EPOLLOUT) {
-      trace!("fd={}: EPOLLOUT", fd);
+      trace!("fd={}: EPOLLOUT", self.sockfd);
       self.is_writable = true;
     }
 
     if kind.contains(EPOLLERR) {
-      let err = format!("fd={}: EPOLLERR", fd);
+      let err = format!("fd={}: EPOLLERR", self.sockfd);
       error!("{}", err);
-      or_complete!(Err(err.into()), self, fd);
+      or_complete!(Err(err.into()), self);
     }
 
-    or_complete!(self.try_read(fd), self, fd);
-
-    loop {
-      match or_complete!(SonicMessage::from_buffer(&mut *self.input_buffer), self, fd) {
-        Some(msg) => {
-          if let Some(res) = self.next.ready(msg) {
-            trace!("next.ready(): {:?}", res);
-            or_complete!(self.buffer(res), self, fd);
-          }
-        }
-        None => {
-          trace!("no message to frame from input buffer");
-          break;
-        }
-      }
-    }
-
-    or_complete!(self.try_write(fd), self, fd)
+    or_complete!(self.try_read(), self);
+    or_complete!(self.try_write(), self)
   }
 }
 
@@ -256,24 +258,16 @@ impl<'b, H> Handler<EpollEvent, MuxCmd> for SonicHandler<'b, H>
 mod tests {
   extern crate env_logger;
   use model::*;
+  use rux::RawFd;
+  use rux::buf::*;
+  use rux::handler::*;
+  use rux::mux::*;
+  use rux::poll::*;
   use rux::sys::socket::*;
   use serde_json::Value;
   use super::*;
 
   const BUF_SIZE: usize = 256;
-
-  struct TestHandler;
-
-  impl Reset for TestHandler {
-    fn reset(&mut self, _: EpollFd) {}
-  }
-
-  impl Handler<SonicMessage, Option<SonicMessage>> for TestHandler {
-    fn ready(&mut self, i: SonicMessage) -> Option<SonicMessage> {
-      println!(">>>>>>>>>> {:?}", i);
-      Some(i)
-    }
-  }
 
   fn setup_logger() {
     let mut builder = env_logger::LogBuilder::new();
@@ -304,28 +298,29 @@ mod tests {
          SonicMessage::StreamCompleted(Some("".to_owned()), ".to".to_owned())]
   }
 
-  fn new_handler<'a>(input_buffer: &'a mut ByteBuffer, output_buffer: &'a mut ByteBuffer)
-                     -> SonicHandler<'a, TestHandler> {
+  fn new_handler<'a>(input_buffer: &'a mut ByteBuffer, output_buffer: &'a mut ByteBuffer,
+                     fd: RawFd)
+                     -> SonicHandler<'a> {
     let epfd: EpollFd = EpollFd::new(0);
-    SonicHandler::new(input_buffer, output_buffer, epfd, TestHandler)
+    SonicHandler::new(input_buffer, output_buffer, epfd, fd)
   }
 
   fn setup_socketpair() -> (RawFd, RawFd, EpollEvent, EpollEvent, EpollEvent, EpollEvent) {
     let (s1, s2) = socketpair(AddressFamily::Unix, SockType::Stream, 0, SockFlag::empty()).unwrap();
     let readable = EpollEvent {
-      data: s1,
+      data: s1 as u64,
       events: EPOLLIN,
     };
     let writable = EpollEvent {
-      data: s1,
+      data: s1 as u64,
       events: EPOLLOUT,
     };
     let half_close = EpollEvent {
-      data: s1,
+      data: s1 as u64,
       events: EPOLLRDHUP,
     };
     let close = EpollEvent {
-      data: s1,
+      data: s1 as u64,
       events: EPOLLHUP,
     };
     (s1, s2, readable, writable, half_close, close)
@@ -345,10 +340,10 @@ mod tests {
   #[test]
   fn ser_de_correctly() {
     setup_logger();
-    let (_, s2, readable, writable, _, _) = setup_socketpair();
+    let (s1, s2, readable, writable, _, _) = setup_socketpair();
     let mut input_buffer = ByteBuffer::with_capacity(BUF_SIZE);
     let mut output_buffer = ByteBuffer::with_capacity(BUF_SIZE);
-    let mut handler = new_handler(&mut input_buffer, &mut output_buffer);
+    let mut handler = new_handler(&mut input_buffer, &mut output_buffer, s1);
     let mut cmd;
 
     let msgs = get_stream_msgs();
@@ -362,6 +357,17 @@ mod tests {
       assert_eq!(cmd, MuxCmd::Keep);
 
       cmd = handler.ready(writable.clone());
+      assert_eq!(cmd, MuxCmd::Keep);
+
+      let mut buf = Vec::new();
+      frame!(handler.input_buffer, |msg| {
+        buf.push(msg);
+      }).unwrap();
+
+      let recv: SonicMessage = buf.pop().unwrap();
+      assert_eq!(recv, msg.clone());
+
+      cmd = handler.ready(recv);
       assert_eq!(cmd, MuxCmd::Keep);
 
       let mut buf = ByteBuffer::with_capacity(2048);
@@ -378,10 +384,10 @@ mod tests {
   #[test]
   fn shutdown_on_close() {
     setup_logger();
-    let (_, _, _, _, _, close) = setup_socketpair();
+    let (s1, _, _, _, _, close) = setup_socketpair();
     let mut input_buffer = ByteBuffer::with_capacity(BUF_SIZE);
     let mut output_buffer = ByteBuffer::with_capacity(BUF_SIZE);
-    let mut handler = new_handler(&mut input_buffer, &mut output_buffer);
+    let mut handler = new_handler(&mut input_buffer, &mut output_buffer, s1);
     let cmd = handler.ready(close);
     assert_eq!(cmd, MuxCmd::Close);
   }
@@ -391,10 +397,10 @@ mod tests {
   fn flush_shutdown_on_half_close() {
     {
       setup_logger();
-      let (_, _, _, _, half_close, _) = setup_socketpair();
+      let (s1, _, _, _, half_close, _) = setup_socketpair();
       let mut input_buffer = ByteBuffer::with_capacity(BUF_SIZE);
       let mut output_buffer = ByteBuffer::with_capacity(BUF_SIZE);
-      let mut handler = new_handler(&mut input_buffer, &mut output_buffer);
+      let mut handler = new_handler(&mut input_buffer, &mut output_buffer, s1);
       let cmd = handler.ready(half_close);
       assert_eq!(cmd, MuxCmd::Close);
     }
@@ -402,15 +408,26 @@ mod tests {
 
     {
       setup_logger();
-      let (_, s2, readable, writable, half_close, _) = setup_socketpair();
+      let (s1, s2, readable, writable, half_close, _) = setup_socketpair();
       let mut input_buffer = ByteBuffer::with_capacity(BUF_SIZE);
       let mut output_buffer = ByteBuffer::with_capacity(BUF_SIZE);
       let msg = get_stream_msgs().pop().unwrap();
-      let mut handler = new_handler(&mut input_buffer, &mut output_buffer);
+      let mut handler = new_handler(&mut input_buffer, &mut output_buffer, s1);
       let mut cmd;
 
       ::rux::write(s2, &msg.clone().into_bytes().unwrap()).unwrap();
       cmd = handler.ready(readable.clone());
+      assert_eq!(cmd, MuxCmd::Keep);
+
+      let mut buf = Vec::new();
+      frame!(handler.input_buffer, |msg| {
+        buf.push(msg);
+      }).unwrap();
+
+      let recv: SonicMessage = buf.pop().unwrap();
+      assert_eq!(recv, msg.clone());
+
+      cmd = handler.ready(recv);
       assert_eq!(cmd, MuxCmd::Keep);
 
       cmd = handler.ready(half_close);
@@ -431,10 +448,10 @@ mod tests {
   #[test]
   fn buffered_ser_de() {
     setup_logger();
-    let (_, s2, readable, writable, _, _) = setup_socketpair();
+    let (s1, s2, readable, writable, _, _) = setup_socketpair();
     let mut input_buffer = ByteBuffer::with_capacity(BUF_SIZE);
     let mut output_buffer = ByteBuffer::with_capacity(128);
-    let mut handler = new_handler(&mut input_buffer, &mut output_buffer);
+    let mut handler = new_handler(&mut input_buffer, &mut output_buffer, s1);
     let mut cmd;
 
     let msgs = get_stream_msgs();
@@ -453,6 +470,18 @@ mod tests {
       cmd = handler.ready(writable.clone());
       assert_eq!(cmd, MuxCmd::Keep);
 
+      let mut buf = Vec::new();
+      frame!(handler.input_buffer, |msg| {
+        buf.push(msg);
+      }).unwrap();
+
+      let recv: SonicMessage = buf.pop().unwrap();
+      assert_eq!(recv, msg.clone());
+
+      cmd = handler.ready(recv);
+      assert_eq!(cmd, MuxCmd::Keep);
+
+
       let mut buf = ByteBuffer::with_capacity(2048);
       let cnt = ::rux::read(s2, From::from(&mut buf)).unwrap().unwrap();
       buf.extend(cnt);
@@ -466,7 +495,7 @@ mod tests {
   #[test]
   fn enforce_msg_size() {
     setup_logger();
-    let (_, s2, readable, writable, _, _) = setup_socketpair();
+    let (s1, s2, readable, writable, _, _) = setup_socketpair();
     let mut input_buffer = ByteBuffer::with_capacity(BUF_SIZE);
     let mut output_buffer = ByteBuffer::with_capacity(BUF_SIZE);
     let mut handler = SonicHandler {
@@ -478,7 +507,7 @@ mod tests {
       input_buffer: &mut input_buffer,
       output_buffer: &mut output_buffer,
       epfd: EpollFd::new(0),
-      handler: TestHandler,
+      sockfd: s1,
     };
     let mut cmd;
 
