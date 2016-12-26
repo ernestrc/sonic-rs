@@ -135,7 +135,7 @@ impl<'b> SonicHandler<'b> {
 
     let msg = SonicMessage::complete::<()>(Err(err), "".to_owned());
     self.buffer(msg).unwrap();
-    self.try_write().unwrap()
+    self.try_write().unwrap_or(MuxCmd::Close)
   }
 
   #[inline(always)]
@@ -175,15 +175,15 @@ impl<'b> Reset for SonicHandler<'b> {
 }
 
 macro_rules! or_complete {
-    ($e:expr, $sel:expr) => {{
-        match $e {
-            Ok(cmd) => cmd,
-            Err(e) => {
-                error!("or_complete!: {}", e);
-                return $sel.complete_err(e);
-            },
-        }
-    }}
+  ($e:expr, $sel:expr) => {{
+    match $e {
+      Ok(cmd) => cmd,
+      Err(e) => {
+        error!("or_complete!: {}", e);
+        return $sel.complete_err(e);
+      },
+    }
+  }}
 }
 
 impl<'b> Handler<SonicMessage, MuxCmd> for SonicHandler<'b> {
@@ -201,7 +201,10 @@ macro_rules! frame {
     loop {
       match SonicMessage::from_buffer($buffer) {
         Ok(Some(msg)) => {
-          $func(msg);
+          match $func(msg) {
+            e@MuxCmd::Close => return e,
+            _ => {},
+          }
         }
         Ok(None) => {
           trace!("no message to frame from input buffer");

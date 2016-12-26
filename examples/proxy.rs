@@ -7,6 +7,7 @@ extern crate log;
 extern crate env_logger;
 
 use rux::buf::*;
+use rux::error::*;
 use rux::handler::*;
 use rux::mux::*;
 use rux::poll::*;
@@ -91,7 +92,7 @@ impl<'b> ProxyHandler<'b> {
 
 impl<'b> Drop for ProxyHandler<'b> {
   fn drop(&mut self) {
-    error!("unistd::close: ${:?}", ::rux::close(self.outgoing));
+    perror!("unistd::close", ::rux::close(self.outgoing));
   }
 }
 
@@ -99,16 +100,10 @@ impl<'b> Handler<EpollEvent, MuxCmd> for ProxyHandler<'b> {
   fn ready(&mut self, event: EpollEvent) -> MuxCmd {
     if event.data as i32 == self.incoming {
       trace!("ready(): incoming");
-      match self.incoming_handler.ready(event) {
-        e @ MuxCmd::Close => return e,
-        _ => {}
-      };
+      keep!(self.incoming_handler.ready(event));
     } else {
       trace!("ready(): outgoing");
-      match self.outgoing_handler.ready(event) {
-        e @ MuxCmd::Close => return e,
-        _ => {}
-      };
+      keep!(self.outgoing_handler.ready(event));
     }
 
     frame!(self.incoming_handler.input_buffer, |msg| {
