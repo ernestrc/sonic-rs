@@ -5,3 +5,4 @@ perf/*
 npm-debug.log
 lib/rust/src/_io
 tags
+*.bk

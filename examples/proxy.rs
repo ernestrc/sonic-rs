@@ -97,24 +97,24 @@ impl<'b> Drop for ProxyHandler<'b> {
 }
 
 impl<'b> Handler<EpollEvent, MuxCmd> for ProxyHandler<'b> {
-  fn ready(&mut self, event: EpollEvent) -> MuxCmd {
+  fn on_next(&mut self, event: EpollEvent) -> MuxCmd {
     if event.data as i32 == self.incoming {
-      trace!("ready(): incoming");
-      keep!(self.incoming_handler.ready(event));
+      trace!("on_next(): incoming");
+      keep!(self.incoming_handler.on_next(event));
     } else {
-      trace!("ready(): outgoing");
-      keep!(self.outgoing_handler.ready(event));
+      trace!("on_next(): outgoing");
+      keep!(self.outgoing_handler.on_next(event));
     }
 
     frame!(self.incoming_handler.input_buffer, |msg| {
         trace!("Client: {:?}", msg);
-        self.outgoing_handler.ready(msg)
+        self.outgoing_handler.on_next(msg)
       })
       .unwrap();
 
     frame!(self.outgoing_handler.input_buffer, |msg| {
         trace!("Server: {:?}", msg);
-        self.incoming_handler.ready(msg)
+        self.incoming_handler.on_next(msg)
       })
       .unwrap();
 

@@ -187,7 +187,7 @@ macro_rules! or_complete {
 }
 
 impl<'b> Handler<SonicMessage, MuxCmd> for SonicHandler<'b> {
-  fn ready(&mut self, msg: SonicMessage) -> MuxCmd {
+  fn on_next(&mut self, msg: SonicMessage) -> MuxCmd {
     trace!("ready(SonicMessage): {:?}", msg);
     or_complete!(self.buffer(msg), self);
     or_complete!(self.try_write(), self)
@@ -211,7 +211,7 @@ macro_rules! frame {
           res = Ok(());
           break;
         },
-        Err(e) => { 
+        Err(e) => {
           res = Err(e);
           break;
         },
@@ -222,7 +222,7 @@ macro_rules! frame {
 }
 
 impl<'b> Handler<EpollEvent, MuxCmd> for SonicHandler<'b> {
-  fn ready(&mut self, event: EpollEvent) -> MuxCmd {
+  fn on_next(&mut self, event: EpollEvent) -> MuxCmd {
     let kind = event.events;
     trace!("ready(EpollEvent{{ {:?}, {:?} }})", &self.sockfd, &kind);
 
@@ -352,25 +352,26 @@ mod tests {
     let msgs = get_stream_msgs();
 
     for msg in msgs {
-      cmd = handler.ready(readable.clone());
+      cmd = handler.on_next(readable.clone());
       assert_eq!(cmd, MuxCmd::Keep);
 
       ::rux::write(s2, &msg.clone().into_bytes().unwrap()).unwrap();
-      cmd = handler.ready(readable.clone());
+      cmd = handler.on_next(readable.clone());
       assert_eq!(cmd, MuxCmd::Keep);
 
-      cmd = handler.ready(writable.clone());
+      cmd = handler.on_next(writable.clone());
       assert_eq!(cmd, MuxCmd::Keep);
 
       let mut buf = Vec::new();
       frame!(handler.input_buffer, |msg| {
-        buf.push(msg);
-      }).unwrap();
+          buf.push(msg);
+        })
+        .unwrap();
 
       let recv: SonicMessage = buf.pop().unwrap();
       assert_eq!(recv, msg.clone());
 
-      cmd = handler.ready(recv);
+      cmd = handler.on_next(recv);
       assert_eq!(cmd, MuxCmd::Keep);
 
       let mut buf = ByteBuffer::with_capacity(2048);
@@ -391,7 +392,7 @@ mod tests {
     let mut input_buffer = ByteBuffer::with_capacity(BUF_SIZE);
     let mut output_buffer = ByteBuffer::with_capacity(BUF_SIZE);
     let mut handler = new_handler(&mut input_buffer, &mut output_buffer, s1);
-    let cmd = handler.ready(close);
+    let cmd = handler.on_next(close);
     assert_eq!(cmd, MuxCmd::Close);
   }
 
@@ -404,7 +405,7 @@ mod tests {
       let mut input_buffer = ByteBuffer::with_capacity(BUF_SIZE);
       let mut output_buffer = ByteBuffer::with_capacity(BUF_SIZE);
       let mut handler = new_handler(&mut input_buffer, &mut output_buffer, s1);
-      let cmd = handler.ready(half_close);
+      let cmd = handler.on_next(half_close);
       assert_eq!(cmd, MuxCmd::Close);
     }
 
@@ -419,24 +420,25 @@ mod tests {
       let mut cmd;
 
       ::rux::write(s2, &msg.clone().into_bytes().unwrap()).unwrap();
-      cmd = handler.ready(readable.clone());
+      cmd = handler.on_next(readable.clone());
       assert_eq!(cmd, MuxCmd::Keep);
 
       let mut buf = Vec::new();
       frame!(handler.input_buffer, |msg| {
-        buf.push(msg);
-      }).unwrap();
+          buf.push(msg);
+        })
+        .unwrap();
 
       let recv: SonicMessage = buf.pop().unwrap();
       assert_eq!(recv, msg.clone());
 
-      cmd = handler.ready(recv);
+      cmd = handler.on_next(recv);
       assert_eq!(cmd, MuxCmd::Keep);
 
-      cmd = handler.ready(half_close);
+      cmd = handler.on_next(half_close);
       assert_eq!(cmd, MuxCmd::Keep);
 
-      cmd = handler.ready(writable.clone());
+      cmd = handler.on_next(writable.clone());
       assert_eq!(cmd, MuxCmd::Close);
 
       let mut buf = ByteBuffer::with_capacity(BUF_SIZE);
@@ -463,25 +465,26 @@ mod tests {
       let bytes = msg.clone().into_bytes().unwrap();
       let (slice1, slice2) = bytes.split_at(5);
       ::rux::write(s2, slice1).unwrap();
-      cmd = handler.ready(readable.clone());
+      cmd = handler.on_next(readable.clone());
       assert_eq!(cmd, MuxCmd::Keep);
 
       ::rux::write(s2, slice2).unwrap();
-      cmd = handler.ready(readable.clone());
+      cmd = handler.on_next(readable.clone());
       assert_eq!(cmd, MuxCmd::Keep);
 
-      cmd = handler.ready(writable.clone());
+      cmd = handler.on_next(writable.clone());
       assert_eq!(cmd, MuxCmd::Keep);
 
       let mut buf = Vec::new();
       frame!(handler.input_buffer, |msg| {
-        buf.push(msg);
-      }).unwrap();
+          buf.push(msg);
+        })
+        .unwrap();
 
       let recv: SonicMessage = buf.pop().unwrap();
       assert_eq!(recv, msg.clone());
 
-      cmd = handler.ready(recv);
+      cmd = handler.on_next(recv);
       assert_eq!(cmd, MuxCmd::Keep);
 
 
@@ -520,10 +523,10 @@ mod tests {
     assert!(bytes.len() > 256);
 
     ::rux::write(s2, &bytes).unwrap();
-    cmd = handler.ready(readable.clone());
+    cmd = handler.on_next(readable.clone());
     assert_eq!(cmd, MuxCmd::Keep);
 
-    cmd = handler.ready(writable.clone());
+    cmd = handler.on_next(writable.clone());
     assert_eq!(cmd, MuxCmd::Keep);
 
     let mut buf = ByteBuffer::with_capacity(2048);
