@@ -109,13 +109,13 @@ impl<'h, 'b> Handler<'h, EpollEvent, MuxCmd> for ProxyHandler<'b> {
     keep!(frame!(self.incoming_handler.input_buffer, |msg| {
         trace!("Client: {:?}", msg);
         self.outgoing_handler.on_next(msg)
-      }, MuxCmd::Keep)
+      })
       .unwrap());
 
     keep!(frame!(self.outgoing_handler.input_buffer, |msg| {
         trace!("Server: {:?}", msg);
         self.incoming_handler.on_next(msg)
-      }, MuxCmd::Keep).unwrap());
+      }).unwrap());
 
     MuxCmd::Keep
   }

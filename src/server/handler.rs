@@ -205,8 +205,8 @@ impl<'h, 'b> Handler<'h, SonicMessage, MuxCmd> for SonicHandler<'b> {
 
 #[macro_export]
 macro_rules! frame {
-  ($buffer:expr, $func:expr, $default: expr) => {{
-    let mut res = Ok($default);
+  ($buffer:expr, $func:expr) => {{
+    let mut res = Ok(Default::default());
     loop {
       match SonicMessage::from_buffer($buffer) {
         Ok(Some(msg)) => {
@@ -369,7 +369,7 @@ mod tests {
       assert_eq!(cmd, MuxCmd::Keep);
 
       let mut buf = Vec::new();
-      frame!(handler.input_buffer, |msg| buf.push(msg), ()).unwrap();
+      frame!(handler.input_buffer, |msg| buf.push(msg)).unwrap();
 
       let recv: SonicMessage = buf.pop().unwrap();
       assert_eq!(recv, msg.clone());
@@ -437,7 +437,7 @@ mod tests {
       assert_eq!(cmd, MuxCmd::Keep);
 
       let mut buf = Vec::new();
-      frame!(handler.input_buffer, |msg| buf.push(msg), ()).unwrap();
+      frame!(handler.input_buffer, |msg| buf.push(msg)).unwrap();
 
       let recv: SonicMessage = buf.pop().unwrap();
       assert_eq!(recv, msg.clone());
@@ -490,7 +490,7 @@ mod tests {
       assert_eq!(cmd, MuxCmd::Keep);
 
       let mut buf = Vec::new();
-      frame!(handler.input_buffer, |msg| buf.push(msg), ()).unwrap();
+      frame!(handler.input_buffer, |msg| buf.push(msg)).unwrap();
 
       let recv: SonicMessage = buf.pop().unwrap();
       assert_eq!(recv, msg.clone());
