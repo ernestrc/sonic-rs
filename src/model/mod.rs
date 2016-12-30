@@ -69,7 +69,6 @@ pub enum QueryStatus {
   Finished,
 }
 
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum SonicMessage {
   // client ~> server

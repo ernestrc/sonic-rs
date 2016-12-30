@@ -32,22 +32,22 @@ struct SonicProxy {
   outgoing_output_buffers: Vec<ByteBuffer>,
 }
 
-impl<'b> HandlerFactory<'b, EpollEvent, MuxCmd> for SonicProxy {
-  type H = ProxyHandler<'b>;
+impl<'p> HandlerFactory<'p, ProxyHandler<'p>, EpollEvent, MuxCmd> for SonicProxy {
 
-  fn done(&mut self, _: ProxyHandler<'b>, index: usize) {
+  fn done(&mut self, _: ProxyHandler<'p>, index: usize) {
     self.incoming_input_buffers[index].clear();
     self.incoming_output_buffers[index].clear();
     self.outgoing_input_buffers[index].clear();
     self.outgoing_output_buffers[index].clear();
   }
 
-  fn new(&'b mut self, epfd: EpollFd, index: usize, incoming: RawFd) -> ProxyHandler<'b> {
+  fn new(&'p mut self, epfd: EpollFd, index: usize, incoming: RawFd) -> ProxyHandler<'p> {
     let inet_addr_std: ::std::net::SocketAddr = "0.0.0.0:10001".parse().unwrap();
     let inet_addr = InetAddr::from_std(&inet_addr_std);
     let sockaddr = SockAddr::Inet(inet_addr);
     let outgoing = socket(AddressFamily::Inet, SockType::Stream, SockFlag::empty(), 6).unwrap();
     connect(outgoing, &sockaddr).unwrap();
+    debug!("connected to {:?}", &inet_addr_std);
 
     epfd.register(outgoing,
                 &EpollEvent {
@@ -96,7 +96,7 @@ impl<'b> Drop for ProxyHandler<'b> {
   }
 }
 
-impl<'b> Handler<EpollEvent, MuxCmd> for ProxyHandler<'b> {
+impl<'h, 'b> Handler<'h, EpollEvent, MuxCmd> for ProxyHandler<'b> {
   fn on_next(&mut self, event: EpollEvent) -> MuxCmd {
     if event.data as i32 == self.incoming {
       trace!("on_next(): incoming");
@@ -106,17 +106,16 @@ impl<'b> Handler<EpollEvent, MuxCmd> for ProxyHandler<'b> {
       keep!(self.outgoing_handler.on_next(event));
     }
 
-    frame!(self.incoming_handler.input_buffer, |msg| {
+    keep!(frame!(self.incoming_handler.input_buffer, |msg| {
         trace!("Client: {:?}", msg);
         self.outgoing_handler.on_next(msg)
-      })
-      .unwrap();
+      }, MuxCmd::Keep)
+      .unwrap());
 
-    frame!(self.outgoing_handler.input_buffer, |msg| {
+    keep!(frame!(self.outgoing_handler.input_buffer, |msg| {
         trace!("Server: {:?}", msg);
         self.incoming_handler.on_next(msg)
-      })
-      .unwrap();
+      }, MuxCmd::Keep).unwrap());
 
     MuxCmd::Keep
   }

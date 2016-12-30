@@ -23,6 +23,20 @@ pub struct SonicHandler<'b> {
   completing: bool,
 }
 
+macro_rules! close {
+  ($sel:expr) => {{
+    if !$sel.output_buffer.is_readable() {
+      if $sel.closed_write && $sel.completing {
+        return Ok(MuxCmd::Close);
+      }
+      if $sel.completing {
+        let epfd = $sel.epfd;
+        $sel.reset(epfd);
+      }
+    }
+  }}
+}
+
 impl<'b> SonicHandler<'b> {
   pub fn new(input_buffer: &'b mut ByteBuffer, output_buffer: &'b mut ByteBuffer, epfd: EpollFd,
              sockfd: RawFd)
@@ -44,15 +58,7 @@ impl<'b> SonicHandler<'b> {
 
   #[inline(always)]
   fn try_write(&mut self) -> Result<MuxCmd> {
-    if !self.output_buffer.is_readable() {
-      if self.closed_write {
-        return Ok(MuxCmd::Close);
-      }
-      if self.completing {
-        let epfd = self.epfd;
-        self.reset(epfd);
-      }
-    }
+    close!(self);
 
     if !self.is_writable {
       return Ok(MuxCmd::Keep);
@@ -65,7 +71,7 @@ impl<'b> SonicHandler<'b> {
       match rsend(self.sockfd, From::from(&*self.output_buffer), MSG_DONTWAIT)? {
         None => {
           trace!("SonicHandler::try_write(): not ready");
-          self.is_writable == false;
+          self.is_writable = false;
           break;
         }
         Some(cnt) => {
@@ -79,16 +85,14 @@ impl<'b> SonicHandler<'b> {
       }
     }
 
-    if self.closed_write && !self.output_buffer.is_readable() {
-      return Ok(MuxCmd::Close);
-    }
+    close!(self);
 
     Ok(MuxCmd::Keep)
   }
 
   #[inline(always)]
   fn try_read(&mut self) -> Result<()> {
-    if self.closed_write || !self.is_readable {
+    if !self.is_readable {
       return Ok(());
     }
 
@@ -97,7 +101,7 @@ impl<'b> SonicHandler<'b> {
       match rrecv(self.sockfd, From::from(&mut *self.input_buffer), MSG_DONTWAIT)? {
         Some(0) => {
           trace!("SonicHandler::try_read(): EOF");
-          self.is_readable == false;
+          self.is_readable = false;
           self.closed_write = true;
           break;
         }
@@ -107,11 +111,10 @@ impl<'b> SonicHandler<'b> {
         }
         None => {
           trace!("SonicHandler::try_read(): not ready");
-          self.is_readable == false;
+          self.is_readable = false;
           break;
         }
       }
-
     }
 
     if self.is_readable && !self.input_buffer.is_writable() {
@@ -186,9 +189,15 @@ macro_rules! or_complete {
   }}
 }
 
-impl<'b> Handler<SonicMessage, MuxCmd> for SonicHandler<'b> {
+impl<'h, 'b> Handler<'h, SonicMessage, MuxCmd> for SonicHandler<'b> {
   fn on_next(&mut self, msg: SonicMessage) -> MuxCmd {
-    trace!("ready(SonicMessage): {:?}", msg);
+    trace!("on_next(SonicMessage): {:?}", msg);
+    match &msg {
+      &SonicMessage::StreamCompleted(_, _) => {
+        self.completing = true;
+      }
+      _ => {}
+    };
     or_complete!(self.buffer(msg), self);
     or_complete!(self.try_write(), self)
   }
@@ -196,19 +205,16 @@ impl<'b> Handler<SonicMessage, MuxCmd> for SonicHandler<'b> {
 
 #[macro_export]
 macro_rules! frame {
-  ($buffer:expr, $func:expr) => {{
-    let res;
+  ($buffer:expr, $func:expr, $default: expr) => {{
+    let mut res = Ok($default);
     loop {
       match SonicMessage::from_buffer($buffer) {
         Ok(Some(msg)) => {
-          match $func(msg) {
-            e@MuxCmd::Close => return e,
-            _ => {},
-          }
+          trace!("framed {:?}", msg);
+          res = Ok($func(msg));
         }
         Ok(None) => {
-          trace!("no message to frame from input buffer");
-          res = Ok(());
+          trace!("no message to frame from buffer");
           break;
         },
         Err(e) => {
@@ -221,10 +227,10 @@ macro_rules! frame {
   }}
 }
 
-impl<'b> Handler<EpollEvent, MuxCmd> for SonicHandler<'b> {
+impl<'h, 'b> Handler<'h, EpollEvent, MuxCmd> for SonicHandler<'b> {
   fn on_next(&mut self, event: EpollEvent) -> MuxCmd {
     let kind = event.events;
-    trace!("ready(EpollEvent{{ {:?}, {:?} }})", &self.sockfd, &kind);
+    trace!("on_next(EpollEvent{{ {:?}, {:?} }})", &self.sockfd, &kind);
 
     if kind.contains(EPOLLHUP) {
       trace!("fd={}: EPOLLHUP", self.sockfd);
@@ -363,10 +369,7 @@ mod tests {
       assert_eq!(cmd, MuxCmd::Keep);
 
       let mut buf = Vec::new();
-      frame!(handler.input_buffer, |msg| {
-          buf.push(msg);
-        })
-        .unwrap();
+      frame!(handler.input_buffer, |msg| buf.push(msg), ()).unwrap();
 
       let recv: SonicMessage = buf.pop().unwrap();
       assert_eq!(recv, msg.clone());
@@ -401,11 +404,16 @@ mod tests {
   fn flush_shutdown_on_half_close() {
     {
       setup_logger();
-      let (s1, _, _, _, half_close, _) = setup_socketpair();
+      let (s1, _, _, writable, half_close, _) = setup_socketpair();
       let mut input_buffer = ByteBuffer::with_capacity(BUF_SIZE);
       let mut output_buffer = ByteBuffer::with_capacity(BUF_SIZE);
       let mut handler = new_handler(&mut input_buffer, &mut output_buffer, s1);
-      let cmd = handler.on_next(half_close);
+      let mut cmd = handler.on_next(half_close);
+      assert_eq!(cmd, MuxCmd::Keep);
+
+      cmd = handler.on_next(SonicMessage::complete(Ok(()), "".to_owned()));
+      assert_eq!(cmd, MuxCmd::Keep);
+      cmd = handler.on_next(writable.clone());
       assert_eq!(cmd, MuxCmd::Close);
     }
 
@@ -415,7 +423,12 @@ mod tests {
       let (s1, s2, readable, writable, half_close, _) = setup_socketpair();
       let mut input_buffer = ByteBuffer::with_capacity(BUF_SIZE);
       let mut output_buffer = ByteBuffer::with_capacity(BUF_SIZE);
-      let msg = get_stream_msgs().pop().unwrap();
+      let msg = SonicMessage::QueryProgress {
+        status: QueryStatus::Queued,
+        progress: 0.4,
+        total: None,
+        units: None,
+      };
       let mut handler = new_handler(&mut input_buffer, &mut output_buffer, s1);
       let mut cmd;
 
@@ -424,10 +437,7 @@ mod tests {
       assert_eq!(cmd, MuxCmd::Keep);
 
       let mut buf = Vec::new();
-      frame!(handler.input_buffer, |msg| {
-          buf.push(msg);
-        })
-        .unwrap();
+      frame!(handler.input_buffer, |msg| buf.push(msg), ()).unwrap();
 
       let recv: SonicMessage = buf.pop().unwrap();
       assert_eq!(recv, msg.clone());
@@ -439,6 +449,10 @@ mod tests {
       assert_eq!(cmd, MuxCmd::Keep);
 
       cmd = handler.on_next(writable.clone());
+      // keep because no complete message
+      assert_eq!(cmd, MuxCmd::Keep);
+
+      cmd = handler.on_next(SonicMessage::complete(Ok(()), "".to_owned()));
       assert_eq!(cmd, MuxCmd::Close);
 
       let mut buf = ByteBuffer::with_capacity(BUF_SIZE);
@@ -476,10 +490,7 @@ mod tests {
       assert_eq!(cmd, MuxCmd::Keep);
 
       let mut buf = Vec::new();
-      frame!(handler.input_buffer, |msg| {
-          buf.push(msg);
-        })
-        .unwrap();
+      frame!(handler.input_buffer, |msg| buf.push(msg), ()).unwrap();
 
       let recv: SonicMessage = buf.pop().unwrap();
       assert_eq!(recv, msg.clone());
