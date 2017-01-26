@@ -1,4 +1,6 @@
 extern crate serde_json;
+#[macro_use]
+extern crate serde_derive;
 extern crate serde;
 extern crate regex;
 extern crate docopt;
@@ -9,19 +11,11 @@ extern crate ansi_term;
 extern crate error_chain;
 #[macro_use]
 extern crate log;
-#[macro_use]
 extern crate sonic;
 extern crate rpassword;
 extern crate pbr;
 
-mod util {
-  #[cfg(feature = "serde_macros")]
-  include!("util.rs.in");
-
-  #[cfg(not(feature = "serde_macros"))]
-  include!(concat!(env!("OUT_DIR"), "/util.rs"));
-}
-
+mod util;
 
 use docopt::Docopt;
 use pbr::ProgressBar;
@@ -140,10 +134,10 @@ fn exec(host: &str, port: &u16, query: SonicMessage, rows_only: bool, silent: bo
     for msg in b.drain(..len) {
       let cols = match msg {
         SonicMessage::OutputChunk(data) => {
-          data.iter().fold(String::new(), |acc, val| format!("{}{:?}\t", acc, val))
+          data.iter().fold(String::new(), |acc, val| format!("{}{}\t", acc, val))
         }
         SonicMessage::TypeMetadata(data) => {
-          data.iter().fold(String::new(), |acc, col| format!("{}{:?}\t", acc, col.0))
+          data.iter().fold(String::new(), |acc, col| format!("{}{}\t", acc, col.0))
         }
         _ => panic!("not possible!"),
       };

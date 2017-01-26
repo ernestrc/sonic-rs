@@ -1,15 +1,14 @@
-#![cfg_attr(feature = "serde_macros", feature(custom_derive, plugin))]
-#![cfg_attr(feature = "serde_macros", plugin(serde_macros))]
-extern crate serde;
-extern crate serde_json;
 extern crate nix;
 extern crate byteorder;
+extern crate serde;
 #[macro_use]
-extern crate lazy_static;
+extern crate serde_json;
 #[macro_use]
 extern crate error_chain;
 #[macro_use]
 extern crate log;
+#[macro_use]
+extern crate serde_derive;
 
 #[cfg(feature = "server")]
 #[macro_use]

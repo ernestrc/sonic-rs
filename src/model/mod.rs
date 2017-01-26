@@ -2,6 +2,8 @@ use error::*;
 use io::len_prefix_frame;
 use serde_json::Value;
 
+pub mod protocol;
+
 // marker trait for messages that client can initiate connection with
 pub trait Command {}
 
@@ -38,12 +40,12 @@ impl Query {
   }
 
   pub fn get_config<'a>(&'a self, key: &str) -> Result<&'a Value> {
-    let v = try!(self.config.search(key).ok_or(format!("missing key '{}' in query config", key)));
+    let v = self.config.get(key).ok_or(format!("missing key '{}' in query config", key))?;
     Ok(v)
   }
 
   pub fn get_opt<'a>(&'a self, key: &str) -> Option<&'a Value> {
-    self.config.search(key)
+    self.config.get(key)
   }
 }
 
@@ -105,15 +107,17 @@ impl SonicMessage {
     SonicMessage::StreamCompleted(variation, trace_id).into()
   }
 
-  pub fn into_json(self) -> Value {
+  pub fn into_json(self) -> Result<Value> {
     let msg: protocol::ProtoSonicMessage = From::from(self);
 
-    ::serde_json::to_value(&msg)
+    let v = ::serde_json::to_value(&msg)?;
+
+    Ok(v)
   }
 
   pub fn from_slice(slice: &[u8]) -> Result<SonicMessage> {
-    let proto = try!(::serde_json::from_slice::<protocol::ProtoSonicMessage>(slice));
-    let msg = try!(proto.into_msg());
+    let proto = ::serde_json::from_slice::<protocol::ProtoSonicMessage>(slice)?;
+    let msg = proto.into_msg()?;
 
     Ok(msg)
   }
@@ -123,26 +127,33 @@ impl SonicMessage {
   }
 
   pub fn into_bytes(self) -> Result<Vec<u8>> {
-    let bytes = try!(::serde_json::to_vec(&self.into_json()));
-    let s = try!(len_prefix_frame(bytes));
+    let bytes = ::serde_json::to_vec(&self.into_json()?)?;
+    let s = len_prefix_frame(bytes)?;
     Ok(s)
   }
+}
 
+#[cfg(feature="server")]
+impl ::rux::buf::Buffered for SonicMessage {
+  type Error = Error;
 
-  #[cfg(feature="server")]
-  pub fn from_buffer(buffer: &mut ::rux::buf::ByteBuffer) -> Result<Option<SonicMessage>> {
+  fn max_size() -> usize {
+    usize::max_value()
+  }
+
+  fn from_buffer(buf: &mut ::rux::buf::ByteBuffer) -> Result<Option<SonicMessage>> {
     use byteorder::{BigEndian, ReadBytesExt};
     use std::io;
 
-    let readable = buffer.readable();
+    let readable = buf.readable();
     if readable < 4 {
       return Ok(None);
     }
 
     let len_buf = &mut [0u8; 4];
-    try!(buffer.read(len_buf));
+    buf.read(len_buf)?;
     let mut rdr = io::Cursor::new(len_buf);
-    let len = try!(rdr.read_i32::<BigEndian>()) as usize;
+    let len = rdr.read_i32::<BigEndian>()? as usize;
     let total_len = len + 4;
 
     if readable < total_len {
@@ -150,56 +161,48 @@ impl SonicMessage {
     }
 
     let proto: protocol::ProtoSonicMessage =
-      try!(::serde_json::from_slice(buffer.slice(4).split_at(len).0));
-    let msg = try!(proto.into_msg());
+      ::serde_json::from_slice(buf.slice(4).split_at(len).0)?;
+    let msg = proto.into_msg()?;
 
-    buffer.consume(total_len);
+    buf.consume(total_len);
 
     Ok(Some(msg))
   }
 
-  #[cfg(feature="server")]
-  pub fn to_buffer(self, buffer: &mut ::rux::buf::ByteBuffer) -> Result<()> {
+  fn to_buffer(self, buf: &mut ::rux::buf::ByteBuffer) -> Result<Option<SonicMessage>> {
     use byteorder::{BigEndian, WriteBytesExt};
     use std::io;
 
-    let mark = buffer.mark();
-    let before = buffer.writable();
-    let proto_msg: protocol::ProtoSonicMessage = From::from(self);
+    let mark = buf.mark();
+    let before = buf.writable();
+    let proto_msg: protocol::ProtoSonicMessage = self.into();
 
-    match ::serde_json::to_writer(buffer, &proto_msg) {
+    match ::serde_json::to_writer(buf, &proto_msg) {
+      // TODO catch too small error
       Err(e) => {
-        buffer.reset(mark);
+        buf.reset_from(mark);
         return Err(e).chain_err(|| ErrorKind::BufferTooSmall(proto_msg.into_msg().unwrap()));
       }
-      Ok(_) if buffer.writable() < 4 => {
-        buffer.reset(mark);
-        let err: Error = "not enough space in buffer for length prefix (4b)".into();
-        return Err(err).chain_err(|| ErrorKind::BufferTooSmall(proto_msg.into_msg().unwrap()));
+      Ok(_) if buf.writable() < 4 => {
+        buf.reset_from(mark);
+        // let err: Error = "not enough space in buf for length prefix (4b)".into();
+        return Ok(Some(proto_msg.into_msg().unwrap()));
       }
       Ok(_) => {}
     };
 
-    let len = before - buffer.writable();
+    let len = before - buf.writable();
     let len_buf: &mut [u8] = &mut [0_u8; 4];
 
     {
       let mut len_rdr = io::Cursor::new(&mut *len_buf);
-      try!(len_rdr.write_i32::<BigEndian>(len as i32));
+      len_rdr.write_i32::<BigEndian>(len as i32)?;
     }
 
-    try!(buffer.write_at(mark.next_write, len_buf));
+    buf.write_at(mark.next_write, len_buf)?;
 
-    Ok(())
+    Ok(None)
   }
-}
-
-pub mod protocol {
-  #[cfg(feature = "serde_macros")]
-  include!("protocol.rs.in");
-
-  #[cfg(not(feature = "serde_macros"))]
-  include!(concat!(env!("OUT_DIR"), "/protocol.rs"));
 }
 
 #[cfg(test)]

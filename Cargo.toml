@@ -11,13 +11,9 @@ include = [
   "src/**/*.rs*",
   "cli/**/*.rs*",
   "Cargo.toml",
-  "build.rs"
 ]
-build = "build.rs"
 
 [features]
-default = ["serde_codegen"]
-nightly = ["serde_macros"]
 server = ["rux"]
 
 [lib]
@@ -28,32 +24,31 @@ path = "src/lib.rs"
 name = "sonic"
 path = "cli/src/main.rs"
 
-[build-dependencies]
-serde_codegen = { version = "0.8.2", optional = true }
-syntex = "0.41.0"
-
 [dependencies]
-serde = "0.8.1"
-serde_json = "0.8.1"
-serde_macros = { version = "0.8.1", optional = true }
-error-chain = "0.7.1"
-byteorder = "0.5.3"
-nix = { version = "0.6.0", features = ["signalfd"] }
-log = "0.3.6"
-lazy_static = "0.2.2"
+serde = "0.9"
+serde_json = "0.9"
+serde_derive = "0.9"
+error-chain = "*"
+byteorder = "*"
+nix = { version = "*", features = ["signalfd"] }
+log = "*"
+lazy_static = "*"
 
 # cli
-regex = "0.1.71"
-docopt = "0.6.81"
-rpassword = "0.2.3"
-rustc-serialize = "0.3.19"
-env_logger = "0.3.3"
-ansi_term = "0.7"
-ws = { version =  "0.5.0", optional = true }
-pbr = "0.3.0"
+regex = "*"
+docopt = "*"
+rpassword = "*"
+rustc-serialize = "*"
+env_logger = "*"
+ansi_term = "*"
+pbr = "*"
 
 [dependencies.rux]
-git = "https://github.com/ernestrc/rux.git"
-#path = "/home/ernest/dev/rux"
+# git = "https://github.com/ernestrc/rux.git"
+path = "/home/ernest/dev/rux"
 optional = true
 
+# [profile.release]
+# debug = true
+# opt-level = 3
+# lto = false
