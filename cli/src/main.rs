@@ -9,7 +9,6 @@ extern crate ansi_term;
 extern crate error_chain;
 #[macro_use]
 extern crate log;
-#[macro_use]
 extern crate sonic;
 extern crate rpassword;
 extern crate pbr;

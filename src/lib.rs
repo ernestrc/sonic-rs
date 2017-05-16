@@ -4,7 +4,6 @@ extern crate serde;
 extern crate serde_json;
 extern crate nix;
 extern crate byteorder;
-#[macro_use] extern crate lazy_static;
 #[macro_use] extern crate error_chain;
 #[macro_use] extern crate log;
 

@@ -49,4 +49,4 @@ rustc-serialize = "0.3.19"
 env_logger = "0.3.3"
 ansi_term = "0.7"
 ws = { version =  "0.5.0", optional = true }
-pbr = "0.3.0"
+pbr = "1.0.0"
